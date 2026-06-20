@@ -191,7 +191,6 @@ export default function Blokiq() {
   const [mode, setMode] = useState("normal");
   const [level, setLevel] = useState(0);
   const [grid, setGrid] = useState(null);
-  const [exiting, setExiting] = useState(null);
   const [moveLimit, setMoveLimit] = useState(0);
   const [moves, setMoves] = useState(0);
   const [history, setHistory] = useState([]);
@@ -210,7 +209,6 @@ export default function Blokiq() {
     setLevel(lvl);
     setCurrentMargin(margin);
     setGrid(g);
-    setExiting(null);
     setMoveLimit(ml);
     setMoves(0);
     setHistory([]);
@@ -240,69 +238,66 @@ export default function Blokiq() {
 
   const remainingBlocks = grid ? grid.flat().filter(v=>v!==null).length : 36;
 
-  const finishMove = useCallback((newGrid, newMoves) => {
-    setGrid(newGrid);
-    setMoves(newMoves);
-    const remaining = newGrid.flat().filter(v=>v!==null).length;
-    if (remaining === 0) {
-      clearInterval(timerRef.current);
-      setGameStatus("won");
-    } else if (newMoves >= moveLimit) {
-      setGameStatus("lost");
-    }
-  }, [moveLimit]);
+  // Every mutation (arrow reposition OR tap-to-exit) goes through this single
+  // path. It reads the grid via the FUNCTIONAL setGrid form, so even if two
+  // taps land within the same render tick, the second always sees the result
+  // of the first — no race, no "blocks coming back".
+  const applyMutation = useCallback((computeFn) => {
+    if (gameStatus !== "playing") return;
+    setGrid(currentGrid => {
+      const newGrid = computeFn(currentGrid);
+      if (newGrid === currentGrid) return currentGrid; // no-op, nothing changed
+      setHistory(h => [currentGrid.map(row=>[...row]), ...h].slice(0,3));
+      setMoves(m => {
+        const newMoves = m + 1;
+        const remaining = newGrid.flat().filter(v=>v!==null).length;
+        if (remaining === 0) { clearInterval(timerRef.current); setGameStatus("won"); }
+        else if (newMoves >= moveLimit) { setGameStatus("lost"); }
+        return newMoves;
+      });
+      return newGrid;
+    });
+  }, [gameStatus, moveLimit]);
 
   // Row/column repositioning arrows
-  const makeMove = useCallback((newGrid) => {
-    if (gameStatus !== "playing") return;
-    const newHistory = [grid.map(row=>[...row]), ...history].slice(0,3);
-    setHistory(newHistory);
-    finishMove(newGrid, moves+1);
-  }, [gameStatus, grid, history, moves, finishMove]);
+  const makeMove = useCallback((dirFn) => { applyMutation(dirFn); }, [applyMutation]);
 
-  // Tap a block: if it's already sitting in its own matching row, it exits.
+  // Tap a block: if it's already sitting in its own matching row, it exits
+  // immediately and the rest of that row shifts left to close the gap.
   const tapBlock = useCallback((r, c) => {
-    if (gameStatus !== "playing") return;
-    const colorId = grid[r][c];
-    if (colorId === null || colorId !== r) return; // not eligible, do nothing
-
-    const newHistory = [grid.map(row=>[...row]), ...history].slice(0,3);
-    setHistory(newHistory);
-    setExiting({ r, c });
-    const newMoves = moves + 1;
-    setTimeout(() => {
-      const ng = removeFromRow(grid, r, c);
-      setExiting(null);
-      finishMove(ng, newMoves);
-    }, 230);
-  }, [grid, gameStatus, history, moves, finishMove]);
+    applyMutation(currentGrid => {
+      const colorId = currentGrid[r][c];
+      if (colorId === null || colorId !== r) return currentGrid; // not eligible
+      return removeFromRow(currentGrid, r, c);
+    });
+  }, [applyMutation]);
 
   const useBonus = useCallback((type, fromRetry=false) => {
     setBonuses(b => { const idx=b.indexOf(type); if (idx===-1) return b; return [...b.slice(0,idx), ...b.slice(idx+1)]; });
     if (type === "extra_move") {
       setMoveLimit(ml => ml + 1);
     } else if (type === "remove_block") {
-      const target = findBonusBlock(grid);
-      if (target) {
-        setExiting(target);
-        setTimeout(() => {
-          const ng = removeFromRow(grid, target.r, target.c);
-          setExiting(null);
-          const remaining = ng.flat().filter(v=>v!==null).length;
-          setGrid(ng);
-          if (remaining === 0) { clearInterval(timerRef.current); setGameStatus(s=> s==="playing"?"won":s); }
-        }, 230);
-      }
+      setGrid(currentGrid => {
+        const target = findBonusBlock(currentGrid);
+        if (!target) return currentGrid;
+        const ng = removeFromRow(currentGrid, target.r, target.c);
+        const remaining = ng.flat().filter(v=>v!==null).length;
+        if (remaining === 0) { clearInterval(timerRef.current); setGameStatus(s=> s==="playing"?"won":s); }
+        return ng;
+      });
     } else if (type === "undo_3") {
-      if (history.length > 0) {
-        const target = history[Math.min(2, history.length-1)];
-        setGrid(target);
-        setMoves(m => Math.max(0, m - history.length));
-        setHistory([]);
-      }
+      setHistory(h => {
+        if (h.length > 0) {
+          const target = h[Math.min(2, h.length-1)];
+          setGrid(target);
+          setMoves(m => Math.max(0, m - h.length));
+          return [];
+        }
+        return h;
+      });
     }
     if (fromRetry) setRetryAvailable(true);
-  }, [grid, history]);
+  }, []);
 
   const handleWin = useCallback(() => {
     const newLevelsWon = levelsWon + 1;
@@ -413,7 +408,7 @@ export default function Blokiq() {
         border:"1px solid #ffffff0A", maxWidth:"100%" }}>
         <div style={{ display:"flex",gap:4,marginBottom:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
           {Array.from({length:GRID_SIZE},(_,c)=>(
-            <ArrowBtn key={c} label="▲" disabled={disabled} onClick={()=>makeMove(slideColUp(grid,c))} horizontal={false} />
+            <ArrowBtn key={c} label="▲" disabled={disabled} onClick={()=>makeMove(g=>slideColUp(g,c))} horizontal={false} />
           ))}
         </div>
 
@@ -421,21 +416,21 @@ export default function Blokiq() {
           <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
             <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
               boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
-            <ArrowBtn label="◄" disabled={disabled} onClick={()=>makeMove(slideRowLeft(grid,r))} horizontal={true} />
+            <ArrowBtn label="◄" disabled={disabled} onClick={()=>makeMove(g=>slideRowLeft(g,r))} horizontal={true} />
             {row.map((cid,c)=> cid===null
               ? <EmptySlot key={c} />
               : <LegoBlock key={c} colorId={cid}
                   eligible={cid===r}
-                  exiting={exiting && exiting.r===r && exiting.c===c}
+                  exiting={false}
                   onTap={()=>tapBlock(r,c)} />
             )}
-            <ArrowBtn label="►" disabled={disabled} onClick={()=>makeMove(slideRowRight(grid,r))} horizontal={true} />
+            <ArrowBtn label="►" disabled={disabled} onClick={()=>makeMove(g=>slideRowRight(g,r))} horizontal={true} />
           </div>
         ))}
 
         <div style={{ display:"flex",gap:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
           {Array.from({length:GRID_SIZE},(_,c)=>(
-            <ArrowBtn key={c} label="▼" disabled={disabled} onClick={()=>makeMove(slideColDown(grid,c))} horizontal={false} />
+            <ArrowBtn key={c} label="▼" disabled={disabled} onClick={()=>makeMove(g=>slideColDown(g,c))} horizontal={false} />
           ))}
         </div>
       </div>
