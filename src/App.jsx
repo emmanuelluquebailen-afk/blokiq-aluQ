@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 const GRID_SIZE = 6;
 const EXPERT_TIME = 180;
+const EMPTY_CELLS_START = 4; // minimum needed for the board to be movable at all
 const LEVEL_MARGINS = [0.25, 0.25, 0.22, 0.22, 0.20, 0.20, 0.15, 0.15, 0.10, 0.10];
 const BONUS_TYPES = ["extra_move", "remove_block", "undo_3"];
 const BONUS_LABELS = { extra_move: "🎯 +1 Coup", remove_block: "🧹 Retirer un bloc", undo_3: "↩️ Annuler 3 coups" };
@@ -15,40 +16,106 @@ const COLORS = [
   { id: 5, hex: "#3399FF", dark: "#1166CC", light: "#88CCFF" },
 ];
 
-// ── Repositioning: whole row/column circular rotation (arrows) ─────────────────
-function slideRowLeft(g, row) { const n=g.map(r=>[...r]); const f=n[row][0]; n[row]=[...n[row].slice(1),f]; return n; }
-function slideRowRight(g, row) { const n=g.map(r=>[...r]); const l=n[row][n[row].length-1]; n[row]=[l,...n[row].slice(0,-1)]; return n; }
-function slideColUp(g, col) { const n=g.map(r=>[...r]); const f=n[0][col]; for(let r=0;r<GRID_SIZE-1;r++) n[r][col]=n[r+1][col]; n[GRID_SIZE-1][col]=f; return n; }
-function slideColDown(g, col) { const n=g.map(r=>[...r]); const l=n[GRID_SIZE-1][col]; for(let r=GRID_SIZE-1;r>0;r--) n[r][col]=n[r-1][col]; n[0][col]=l; return n; }
+// ── Core slide physics ──────────────────────────────────────────────────────────
+// A block slides until it hits a wall or another block. Column 0 (the
+// reference/gate of its row) only lets a MATCHING color through — it passes
+// straight through and exits. A non-matching color simply can't enter column 0
+// at all: it's treated as a wall and stops at column 1.
+function computeSlide(grid, r, c, dir) {
+  const color = grid[r][c];
+  if (color === null) return { type: "none" };
 
-function formatTime(s) { return `${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`; }
-
-// ── Generation: start from the "lined up but not yet sent" board (row r is all
-// color r), scramble it with random row/column rotations. Reversing exactly
-// those rotations gets back to lined-up, then 36 taps clear it — so every
-// generated board is guaranteed solvable, and (scramble + 36) is a real,
-// reachable move count we use as the baseline for the level's move limit.
-function generateGrid(margin) {
-  let g = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
-  const scramble = 40 + Math.floor(Math.random()*40);
-  for (let m=0;m<scramble;m++) {
-    const type = Math.random()<0.5 ? "row" : "col";
-    const idx = Math.floor(Math.random()*GRID_SIZE);
-    const dir = Math.random()<0.5;
-    if (type==="row") g = dir ? slideRowLeft(g,idx) : slideRowRight(g,idx);
-    else g = dir ? slideColUp(g,idx) : slideColDown(g,idx);
+  if (dir === "left") {
+    let cc = c;
+    while (true) {
+      const next = cc - 1;
+      if (next < 0) {
+        if (color === r) return { type: "exit" };
+        return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
+      }
+      if (next === 0) {
+        if (color === r) return { type: "exit" }; // passes straight through the gate
+        return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } }; // wall for wrong color
+      }
+      if (grid[r][next] !== null) return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
+      cc = next;
+    }
   }
-  const baseline = scramble + GRID_SIZE*GRID_SIZE; // rotations + the 36 mandatory exits
-  return { grid: g, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
+  if (dir === "right") {
+    let cc = c;
+    while (cc + 1 <= GRID_SIZE - 1 && grid[r][cc + 1] === null) cc++;
+    return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
+  }
+  if (dir === "up") {
+    let rr = r;
+    while (rr - 1 >= 0 && grid[rr - 1][c] === null) rr--;
+    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+  }
+  if (dir === "down") {
+    let rr = r;
+    while (rr + 1 <= GRID_SIZE - 1 && grid[rr + 1][c] === null) rr++;
+    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+  }
+  return { type: "none" };
 }
 
-// Remove the block at (r,c): everything to its right in that row shifts left,
-// the freed slot lands at the row's right end.
-function removeFromRow(grid, r, c) {
-  const n = grid.map(row=>[...row]);
-  const row = n[r];
-  n[r] = [...row.slice(0,c), ...row.slice(c+1), null];
-  return n;
+function emptyGrid() { return Array.from({length:GRID_SIZE}, ()=>Array(GRID_SIZE).fill(null)); }
+function formatTime(s) { return `${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`; }
+
+// ── Generation ───────────────────────────────────────────────────────────────
+// Start fully "lined up" (row r = six blocks of color r), open just enough
+// empty cells to make movement possible, then scramble using the SAME legal
+// slide physics the player uses (only ever accepting a "move", never an
+// "exit", during setup). Reversing that exact sequence always works, so every
+// board is guaranteed solvable, and the move count gives a real baseline.
+function hasImmediateExit(grid) {
+  for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) {
+    if (grid[r][c] === null) continue;
+    if (computeSlide(grid, r, c, "left").type === "exit") return true;
+  }
+  return false;
+}
+
+function generatePuzzle(margin) {
+  // Regenerate (rare) if the very first board has no immediately-available
+  // move — the player should always be able to send at least one block home
+  // right away.
+  for (let attempt=0; attempt<6; attempt++) {
+    let grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+
+    const allCells = [];
+    for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) allCells.push([r,c]);
+    allCells.sort(()=>Math.random()-0.5);
+    for (let i=0;i<EMPTY_CELLS_START;i++) {
+      const [r,c] = allCells[i];
+      grid[r][c] = null;
+    }
+
+    const scrambleTarget = 90 + Math.floor(Math.random()*60);
+    let applied = 0, attempts = 0;
+    while (applied < scrambleTarget && attempts < scrambleTarget*15) {
+      attempts++;
+      const r = Math.floor(Math.random()*GRID_SIZE);
+      const c = Math.floor(Math.random()*GRID_SIZE);
+      if (grid[r][c] === null) continue;
+      const dirs = ["up","down","left","right"].sort(()=>Math.random()-0.5);
+      for (const dir of dirs) {
+        const result = computeSlide(grid, r, c, dir);
+        if (result.type === "move") {
+          grid[result.to.r][result.to.c] = grid[r][c];
+          grid[r][c] = null;
+          applied++;
+          break;
+        }
+      }
+    }
+
+    if (hasImmediateExit(grid) || attempt === 5) {
+      const realBlocks = grid.flat().filter(v=>v!==null).length;
+      const baseline = applied + realBlocks;
+      return { grid, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
+    }
+  }
 }
 
 function findBonusBlock(grid) {
@@ -56,24 +123,26 @@ function findBonusBlock(grid) {
   for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) {
     if (grid[r][c] === r) candidates.push({r,c});
   }
-  if (candidates.length===0) return null;
-  return candidates[Math.floor(Math.random()*candidates.length)];
+  if (candidates.length>0) return candidates[Math.floor(Math.random()*candidates.length)];
+  const any = [];
+  for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) if (grid[r][c]!==null) any.push({r,c});
+  if (any.length===0) return null;
+  return any[Math.floor(Math.random()*any.length)];
 }
 
 function randomBonus() { return BONUS_TYPES[Math.floor(Math.random()*BONUS_TYPES.length)]; }
 
 // ── Components ───────────────────────────────────────────────────────────────
-function LegoBlock({ colorId, eligible, exiting, onTap }) {
+function LegoBlock({ colorId, selected, onTap }) {
   const c = COLORS[colorId];
   return (
     <button onClick={onTap}
       onTouchEnd={(e)=>{ e.preventDefault(); onTap(); }}
       style={{ width:"var(--blk)",height:"var(--blk)",borderRadius:7,background:c.hex,position:"relative",overflow:"hidden",
-        border: eligible ? "2px solid #ffffffcc" : "2px solid transparent",
-        boxShadow: exiting ? `0 0 22px ${c.hex}` : (eligible ? `0 0 12px #ffffff66, inset 0 -4px 0 ${c.dark}88` : `inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`),
-        transform: exiting ? "scale(1.3)" : "scale(1)",
-        opacity: exiting ? 0 : 1,
-        transition: "transform 0.25s ease, opacity 0.25s ease, box-shadow 0.2s ease",
+        border: selected ? "2px solid #ffffffdd" : "2px solid transparent",
+        boxShadow: selected ? `0 0 14px #ffffff77, inset 0 -4px 0 ${c.dark}88` : `inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`,
+        transform: selected ? "scale(1.08)" : "scale(1)",
+        transition: "transform 0.15s ease, box-shadow 0.15s ease",
         padding:0, cursor:"pointer", touchAction:"manipulation", flexShrink:0 }}>
       <div style={{ position:"absolute",top:"15%",left:"15%",right:"15%",bottom:"24%",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"11%" }}>
         {[0,1,2,3].map(i=>(
@@ -94,7 +163,7 @@ function EmptySlot() {
     border:"1.5px dashed #ffffff14", background:"#ffffff05", flexShrink:0 }} />;
 }
 
-function ArrowBtn({ label, onClick, horizontal, disabled }) {
+function DPadBtn({ label, onClick, disabled }) {
   const [active, setActive] = useState(false);
   return (
     <button disabled={disabled}
@@ -102,12 +171,11 @@ function ArrowBtn({ label, onClick, horizontal, disabled }) {
       onTouchStart={()=>setActive(true)}
       onTouchEnd={(e)=>{ e.preventDefault(); setActive(false); if(!disabled) onClick(); }}
       onClick={onClick}
-      style={{ width:horizontal?"calc(var(--blk) * 0.565)":"var(--blk)",
-        height:horizontal?"var(--blk)":"calc(var(--blk) * 0.565)",
-        background:active?"#E8C54740":"#ffffff12", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
-        borderRadius:6, color:disabled?"#333":(active?"#E8C547":"#aaaaaa"), fontSize:11, fontWeight:700,
-        cursor:disabled?"default":"pointer", display:"flex", alignItems:"center", justifyContent:"center",
-        transform:active?"scale(0.93)":"scale(1)", transition:"all 0.1s", padding:0, flexShrink:0,
+      style={{ width:"min(54px, calc(var(--blk) * 1.15))", height:"min(54px, calc(var(--blk) * 1.15))",
+        background:active?"#E8C54740":"#ffffff10", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
+        borderRadius:10, color:disabled?"#333":(active?"#E8C547":"#ccc"), fontSize:18, fontWeight:700,
+        cursor:disabled?"default":"pointer", display:"flex",alignItems:"center",justifyContent:"center",
+        transform:active?"scale(0.92)":"scale(1)", transition:"all 0.1s",
         opacity:disabled?0.25:1, touchAction:"manipulation" }}>
       {label}
     </button>
@@ -191,6 +259,7 @@ export default function Blokiq() {
   const [mode, setMode] = useState("normal");
   const [level, setLevel] = useState(0);
   const [grid, setGrid] = useState(null);
+  const [selected, setSelected] = useState(null);
   const [moveLimit, setMoveLimit] = useState(0);
   const [moves, setMoves] = useState(0);
   const [history, setHistory] = useState([]);
@@ -205,10 +274,11 @@ export default function Blokiq() {
   const timerRef = useRef(null);
 
   const loadLevel = useCallback((lvl, margin, retryFlag=true) => {
-    const { grid: g, moveLimit: ml } = generateGrid(margin);
+    const { grid: g, moveLimit: ml } = generatePuzzle(margin);
     setLevel(lvl);
     setCurrentMargin(margin);
     setGrid(g);
+    setSelected(null);
     setMoveLimit(ml);
     setMoves(0);
     setHistory([]);
@@ -238,16 +308,27 @@ export default function Blokiq() {
 
   const remainingBlocks = grid ? grid.flat().filter(v=>v!==null).length : 36;
 
-  // Every mutation (arrow reposition OR tap-to-exit) goes through this single
-  // path. It reads the grid via the FUNCTIONAL setGrid form, so even if two
-  // taps land within the same render tick, the second always sees the result
-  // of the first — no race, no "blocks coming back".
-  const applyMutation = useCallback((computeFn) => {
-    if (gameStatus !== "playing") return;
+  // Direction press on the currently-selected block. Uses functional setGrid
+  // so rapid taps can never race/overwrite each other.
+  const handleDirection = useCallback((dir) => {
+    if (!selected || gameStatus !== "playing") return;
+    const { r, c } = selected;
     setGrid(currentGrid => {
-      const newGrid = computeFn(currentGrid);
-      if (newGrid === currentGrid) return currentGrid; // no-op, nothing changed
+      const result = computeSlide(currentGrid, r, c, dir);
+      if (result.type === "none") return currentGrid;
+
       setHistory(h => [currentGrid.map(row=>[...row]), ...h].slice(0,3));
+      let newGrid;
+      if (result.type === "exit") {
+        newGrid = currentGrid.map(row=>[...row]);
+        newGrid[r][c] = null;
+        setSelected(null);
+      } else {
+        newGrid = currentGrid.map(row=>[...row]);
+        newGrid[result.to.r][result.to.c] = newGrid[r][c];
+        newGrid[r][c] = null;
+        setSelected({ r: result.to.r, c: result.to.c });
+      }
       setMoves(m => {
         const newMoves = m + 1;
         const remaining = newGrid.flat().filter(v=>v!==null).length;
@@ -257,20 +338,16 @@ export default function Blokiq() {
       });
       return newGrid;
     });
-  }, [gameStatus, moveLimit]);
+  }, [selected, gameStatus, moveLimit]);
 
-  // Row/column repositioning arrows
-  const makeMove = useCallback((dirFn) => { applyMutation(dirFn); }, [applyMutation]);
-
-  // Tap a block: if it's already sitting in its own matching row, it exits
-  // immediately and the rest of that row shifts left to close the gap.
   const tapBlock = useCallback((r, c) => {
-    applyMutation(currentGrid => {
-      const colorId = currentGrid[r][c];
-      if (colorId === null || colorId !== r) return currentGrid; // not eligible
-      return removeFromRow(currentGrid, r, c);
+    if (gameStatus !== "playing") return;
+    setGrid(currentGrid => {
+      if (currentGrid[r][c] === null) { setSelected(null); return currentGrid; }
+      setSelected(prev => (prev && prev.r===r && prev.c===c) ? null : { r, c });
+      return currentGrid;
     });
-  }, [applyMutation]);
+  }, [gameStatus]);
 
   const useBonus = useCallback((type, fromRetry=false) => {
     setBonuses(b => { const idx=b.indexOf(type); if (idx===-1) return b; return [...b.slice(0,idx), ...b.slice(idx+1)]; });
@@ -280,7 +357,8 @@ export default function Blokiq() {
       setGrid(currentGrid => {
         const target = findBonusBlock(currentGrid);
         if (!target) return currentGrid;
-        const ng = removeFromRow(currentGrid, target.r, target.c);
+        const ng = currentGrid.map(row=>[...row]);
+        ng[target.r][target.c] = null;
         const remaining = ng.flat().filter(v=>v!==null).length;
         if (remaining === 0) { clearInterval(timerRef.current); setGameStatus(s=> s==="playing"?"won":s); }
         return ng;
@@ -291,6 +369,7 @@ export default function Blokiq() {
           const target = h[Math.min(2, h.length-1)];
           setGrid(target);
           setMoves(m => Math.max(0, m - h.length));
+          setSelected(null);
           return [];
         }
         return h;
@@ -346,7 +425,7 @@ export default function Blokiq() {
 
   return (
     <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
-      "--blk": "min(46px, calc((100vw - 100px) / 7.2))",
+      "--blk": "min(46px, calc((100vw - 90px) / 6))",
       background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
       display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       padding:"16px 12px 48px",
@@ -376,7 +455,7 @@ export default function Blokiq() {
 
       <div style={{ display:"flex",alignItems:"center",gap:14,
         background:"#ffffff0A",padding:"7px 18px",borderRadius:20,
-        border:"1px solid #ffffff10",marginBottom:14,flexWrap:"wrap",justifyContent:"center" }}>
+        border:"1px solid #ffffff10",marginBottom:12,flexWrap:"wrap",justifyContent:"center" }}>
         <div style={{ fontSize:9,letterSpacing:3,textTransform:"uppercase",fontWeight:700,
           color:mode==="expert"?"#FF5E8A":"#3399FF",padding:"3px 10px",borderRadius:10,
           background:mode==="expert"?"#FF5E8A18":"#3399FF18",
@@ -406,34 +485,42 @@ export default function Blokiq() {
       <div style={{ background:"linear-gradient(180deg, #282840, #1E1E34)",borderRadius:18,
         padding:"10px 8px",boxShadow:"0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
         border:"1px solid #ffffff0A", maxWidth:"100%" }}>
-        <div style={{ display:"flex",gap:4,marginBottom:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
-          {Array.from({length:GRID_SIZE},(_,c)=>(
-            <ArrowBtn key={c} label="▲" disabled={disabled} onClick={()=>makeMove(g=>slideColUp(g,c))} horizontal={false} />
-          ))}
-        </div>
-
         {grid && grid.map((row,r)=>(
           <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
             <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
               boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
-            <ArrowBtn label="◄" disabled={disabled} onClick={()=>makeMove(g=>slideRowLeft(g,r))} horizontal={true} />
             {row.map((cid,c)=> cid===null
               ? <EmptySlot key={c} />
               : <LegoBlock key={c} colorId={cid}
-                  eligible={cid===r}
-                  exiting={false}
+                  selected={selected && selected.r===r && selected.c===c}
                   onTap={()=>tapBlock(r,c)} />
             )}
-            <ArrowBtn label="►" disabled={disabled} onClick={()=>makeMove(g=>slideRowRight(g,r))} horizontal={true} />
           </div>
         ))}
-
-        <div style={{ display:"flex",gap:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
-          {Array.from({length:GRID_SIZE},(_,c)=>(
-            <ArrowBtn key={c} label="▼" disabled={disabled} onClick={()=>makeMove(g=>slideColDown(g,c))} horizontal={false} />
-          ))}
-        </div>
       </div>
+
+      {/* D-Pad */}
+      <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:4,marginTop:16 }}>
+        <DPadBtn label="▲" disabled={disabled||!selected} onClick={()=>handleDirection("up")} />
+        <div style={{ display:"flex",gap:4 }}>
+          <DPadBtn label="◄" disabled={disabled||!selected} onClick={()=>handleDirection("left")} />
+          <div style={{ width:"min(54px, calc(var(--blk) * 1.15))",height:"min(54px, calc(var(--blk) * 1.15))",
+            display:"flex",alignItems:"center",justifyContent:"center" }}>
+            {selected && <div style={{ width:10,height:10,borderRadius:"50%",background:"#E8C547" }} />}
+          </div>
+          <DPadBtn label="►" disabled={disabled||!selected} onClick={()=>handleDirection("right")} />
+        </div>
+        <DPadBtn label="▼" disabled={disabled||!selected} onClick={()=>handleDirection("down")} />
+      </div>
+
+      <div style={{ fontSize:10,color:"#444",marginTop:14,letterSpacing:1,textAlign:"center" }}>
+        {selected ? "Touche une direction — il sort tout seul s'il atteint sa couleur" : "Touche un bloc pour le sélectionner"}
+      </div>
+      <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
+        background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
+        color:"#333",fontSize:9,letterSpacing:3,textTransform:"uppercase",cursor:"pointer" }}>
+        Menu
+      </button>
 
       {bonuses.length > 0 && gameStatus === "playing" && (
         <div style={{ display:"flex",gap:8,marginTop:12,flexWrap:"wrap",justifyContent:"center" }}>
@@ -446,15 +533,6 @@ export default function Blokiq() {
           ))}
         </div>
       )}
-
-      <div style={{ fontSize:10,color:"#444",marginTop:12,letterSpacing:1,textAlign:"center" }}>
-        Touche un bloc surligné pour l'envoyer · les flèches repositionnent
-      </div>
-      <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
-        background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
-        color:"#333",fontSize:9,letterSpacing:3,textTransform:"uppercase",cursor:"pointer" }}>
-        Menu
-      </button>
 
       {showBonus && (
         <div style={{ position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",
