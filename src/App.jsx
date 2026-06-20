@@ -1,6 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const GRID_SIZE = 6;
+const EXPERT_TIME = 180;
+const LEVEL_MARGINS = [0.25, 0.25, 0.22, 0.22, 0.20, 0.20, 0.15, 0.15, 0.10, 0.10];
+const BONUS_TYPES = ["extra_move", "solve_line", "undo_3"];
+const BONUS_LABELS = { extra_move: "🎯 +1 Coup", solve_line: "✨ Résoudre une ligne", undo_3: "↩️ Annuler 3 coups" };
 
 const COLORS = [
   { id: 0, hex: "#FF5E8A", dark: "#CC2255", light: "#FF9BBB" },
@@ -12,297 +16,494 @@ const COLORS = [
 ];
 
 // ── Slide helpers ──────────────────────────────────────────────────────────────
-function slideRowLeft(grid, row) {
-  const g = grid.map(r => [...r]);
-  const first = g[row][0];
-  g[row] = [...g[row].slice(1), first];
-  return g;
-}
-function slideRowRight(grid, row) {
-  const g = grid.map(r => [...r]);
-  const last = g[row][g[row].length - 1];
-  g[row] = [last, ...g[row].slice(0, -1)];
-  return g;
-}
-function slideColUp(grid, col) {
-  const g = grid.map(r => [...r]);
-  const first = g[0][col];
-  for (let r = 0; r < GRID_SIZE - 1; r++) g[r][col] = g[r + 1][col];
-  g[GRID_SIZE - 1][col] = first;
-  return g;
-}
-function slideColDown(grid, col) {
-  const g = grid.map(r => [...r]);
-  const last = g[GRID_SIZE - 1][col];
-  for (let r = GRID_SIZE - 1; r > 0; r--) g[r][col] = g[r - 1][col];
-  g[0][col] = last;
-  return g;
-}
+function slideRowLeft(g, row) { const n = g.map(r=>[...r]); const f=n[row][0]; n[row]=[...n[row].slice(1),f]; return n; }
+function slideRowRight(g, row) { const n = g.map(r=>[...r]); const l=n[row][n[row].length-1]; n[row]=[l,...n[row].slice(0,-1)]; return n; }
+function slideColUp(g, col) { const n = g.map(r=>[...r]); const f=n[0][col]; for(let r=0;r<GRID_SIZE-1;r++) n[r][col]=n[r+1][col]; n[GRID_SIZE-1][col]=f; return n; }
+function slideColDown(g, col) { const n = g.map(r=>[...r]); const l=n[GRID_SIZE-1][col]; for(let r=GRID_SIZE-1;r>0;r--) n[r][col]=n[r-1][col]; n[0][col]=l; return n; }
+function checkWin(grid) { return grid.every((row,r)=>row.every(c=>c===r)); }
+function formatTime(s) { return `${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`; }
 
-// ── Generate shuffled-but-solvable grid ────────────────────────────────────────
-function generateGrid() {
-  let g = COLORS.map((_, i) => Array(GRID_SIZE).fill(i));
-  const n = 40 + Math.floor(Math.random() * 40);
-  for (let m = 0; m < n; m++) {
-    const type = Math.random() < 0.5 ? "row" : "col";
-    const idx = Math.floor(Math.random() * GRID_SIZE);
-    const dir = Math.random() < 0.5;
-    if (type === "row") g = dir ? slideRowLeft(g, idx) : slideRowRight(g, idx);
-    else g = dir ? slideColUp(g, idx) : slideColDown(g, idx);
+function generateGrid(margin) {
+  let g = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+  const scramble = 40 + Math.floor(Math.random() * 40);
+  for (let m=0; m<scramble; m++) {
+    const type = Math.random()<0.5?"row":"col";
+    const idx = Math.floor(Math.random()*GRID_SIZE);
+    const dir = Math.random()<0.5;
+    if (type==="row") g = dir ? slideRowLeft(g,idx) : slideRowRight(g,idx);
+    else g = dir ? slideColUp(g,idx) : slideColDown(g,idx);
   }
+  return { grid: g, moveLimit: Math.ceil(scramble*(1+margin)), scramble };
+}
+
+// Solve the row with most correct cells
+function solveBestRow(grid) {
+  let bestRow = -1, bestScore = -1;
+  grid.forEach((row, r) => {
+    if (row.every(c=>c===r)) return; // already solved
+    const score = row.filter(c=>c===r).length;
+    if (score > bestScore) { bestScore=score; bestRow=r; }
+  });
+  if (bestRow === -1) return grid; // all solved
+  const g = grid.map(r=>[...r]);
+  g[bestRow] = Array(GRID_SIZE).fill(bestRow);
   return g;
 }
 
-function checkWin(grid) {
-  return grid.every((row, r) => row.every(cell => cell === r));
-}
+function randomBonus() { return BONUS_TYPES[Math.floor(Math.random()*BONUS_TYPES.length)]; }
 
-// ── LEGO Block ─────────────────────────────────────────────────────────────────
-function LegoBlock({ colorId, flash }) {
+// ── Components ─────────────────────────────────────────────────────────────────
+// All block/arrow sizes derive from the --blk CSS variable (set on the root
+// container) so the whole board scales down automatically on narrow phones.
+function LegoBlock({ colorId }) {
   const c = COLORS[colorId];
   return (
-    <div style={{
-      width: 46, height: 46,
-      borderRadius: 7,
-      background: c.hex,
-      position: "relative",
-      overflow: "hidden",
-      boxShadow: `inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`,
-      transition: "transform 0.12s",
-      transform: flash ? "scale(0.92)" : "scale(1)",
-      flexShrink: 0,
-    }}>
-      {/* 2×2 studs */}
-      <div style={{
-        position: "absolute", top: 7, left: 7, right: 7, bottom: 11,
-        display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5,
-      }}>
-        {[0,1,2,3].map(i => (
-          <div key={i} style={{
-            borderRadius: "50%",
-            background: `radial-gradient(circle at 35% 35%, ${c.light}99, ${c.hex})`,
-            boxShadow: `inset 0 1px 2px ${c.dark}66, 0 1px 1px ${c.light}44`,
-            border: `1px solid ${c.dark}33`,
-          }} />
+    <div style={{ width:"var(--blk)",height:"var(--blk)",borderRadius:7,background:c.hex,position:"relative",overflow:"hidden",
+      boxShadow:`inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`, flexShrink:0 }}>
+      <div style={{ position:"absolute",top:"15%",left:"15%",right:"15%",bottom:"24%",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"11%" }}>
+        {[0,1,2,3].map(i=>(
+          <div key={i} style={{ borderRadius:"50%",
+            background:`radial-gradient(circle at 35% 35%, ${c.light}99, ${c.hex})`,
+            boxShadow:`inset 0 1px 2px ${c.dark}66`, border:`1px solid ${c.dark}33` }} />
         ))}
       </div>
-      {/* Gloss */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, height: "38%",
-        background: `linear-gradient(180deg, ${c.light}55 0%, transparent 100%)`,
-        borderRadius: "7px 7px 0 0", pointerEvents: "none",
-      }} />
+      <div style={{ position:"absolute",top:0,left:0,right:0,height:"38%",
+        background:`linear-gradient(180deg, ${c.light}55 0%, transparent 100%)`,
+        borderRadius:"7px 7px 0 0",pointerEvents:"none" }} />
     </div>
   );
 }
 
-// ── Arrow Button ───────────────────────────────────────────────────────────────
-function ArrowBtn({ label, onClick, horizontal }) {
+function ArrowBtn({ label, onClick, horizontal, disabled }) {
   const [active, setActive] = useState(false);
   return (
-    <button
-      onMouseDown={() => setActive(true)}
-      onMouseUp={() => setActive(false)}
-      onMouseLeave={() => setActive(false)}
-      onTouchStart={() => setActive(true)}
-      onTouchEnd={() => { setActive(false); onClick(); }}
+    <button disabled={disabled}
+      onMouseDown={()=>setActive(true)} onMouseUp={()=>setActive(false)} onMouseLeave={()=>setActive(false)}
+      onTouchStart={()=>setActive(true)} onTouchEnd={()=>{setActive(false);if(!disabled)onClick();}}
       onClick={onClick}
-      style={{
-        width: horizontal ? 26 : 44,
-        height: horizontal ? 44 : 26,
-        background: active ? "#E8C54740" : "#ffffff12",
-        border: `1px solid ${active ? "#E8C54780" : "#ffffff18"}`,
-        borderRadius: 6,
-        color: active ? "#E8C547" : "#aaaaaa",
-        fontSize: 11,
-        fontWeight: 700,
-        cursor: "pointer",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        transform: active ? "scale(0.93)" : "scale(1)",
-        transition: "all 0.1s",
-        padding: 0,
-        flexShrink: 0,
-        lineHeight: 1,
-      }}
-    >
+      style={{ width:horizontal?"calc(var(--blk) * 0.565)":"var(--blk)",
+        height:horizontal?"var(--blk)":"calc(var(--blk) * 0.565)",
+        background:active?"#E8C54740":"#ffffff12", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
+        borderRadius:6, color:disabled?"#333":(active?"#E8C547":"#aaaaaa"), fontSize:11, fontWeight:700,
+        cursor:disabled?"default":"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+        transform:active?"scale(0.93)":"scale(1)", transition:"all 0.1s", padding:0, flexShrink:0,
+        opacity:disabled?0.3:1 }}>
       {label}
     </button>
   );
 }
 
+function Overlay({ children }) {
+  return (
+    <div style={{ position:"fixed",inset:0,background:"#00000090",backdropFilter:"blur(6px)",
+      WebkitBackdropFilter:"blur(6px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100 }}>
+      <div style={{ background:"linear-gradient(145deg, #1A1A30, #2A2A45)",border:"1px solid #ffffff15",
+        borderRadius:28,padding:"40px 48px",textAlign:"center",boxShadow:"0 30px 80px #000000AA",
+        maxWidth:340,width:"90%" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function OBtn({ label, color, onClick }) {
+  return (
+    <button onClick={onClick} style={{ padding:"12px 24px",
+      background:`linear-gradient(135deg, ${color}, ${color}CC)`, border:"none", borderRadius:14,
+      color:"#0D0D1C", fontSize:11, fontWeight:900, letterSpacing:3, cursor:"pointer",
+      textTransform:"uppercase" }}>
+      {label}
+    </button>
+  );
+}
+
+// ── Menu ───────────────────────────────────────────────────────────────────────
+function Menu({ onStart, expertUnlocked }) {
+  return (
+    <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
+      background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
+      display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      padding:"40px 24px", fontFamily:"'Segoe UI', system-ui, sans-serif", color:"#F5F0E8" }}>
+      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden}`}</style>
+      <div style={{ fontSize:52,fontWeight:900,letterSpacing:6,lineHeight:1,marginBottom:6 }}>
+        BLOK<span style={{ color:"#E8C547" }}>IQ</span>
+      </div>
+      <div style={{ fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:52 }}>
+        by aluQ entertainment
+      </div>
+      <div style={{ display:"flex",flexDirection:"column",gap:14,width:"100%",maxWidth:340 }}>
+        <button onClick={()=>onStart("normal")} style={{ background:"linear-gradient(135deg, #1E1E34, #282844)",
+          border:"1px solid #3399FF44",borderRadius:18,padding:"24px",cursor:"pointer",textAlign:"left",
+          boxShadow:"0 8px 32px #3399FF18" }}>
+          <div style={{ fontSize:10,letterSpacing:3,color:"#3399FF",textTransform:"uppercase",marginBottom:6 }}>Mode</div>
+          <div style={{ fontSize:24,fontWeight:900,color:"#F5F0E8",letterSpacing:2,marginBottom:10 }}>NORMAL</div>
+          <div style={{ fontSize:12,color:"#666",lineHeight:1.7 }}>
+            ✦ 10 niveaux progressifs<br/>
+            ✦ Marge de coups décroissante<br/>
+            ✦ Bonus toutes les 2 manches
+          </div>
+        </button>
+        <button onClick={()=>expertUnlocked && onStart("expert")} style={{
+          background:"linear-gradient(135deg, #1E1E34, #282844)",
+          border:`1px solid ${expertUnlocked?"#FF5E8A44":"#333344"}`,
+          borderRadius:18,padding:"24px",cursor:expertUnlocked?"pointer":"default",textAlign:"left",
+          boxShadow:expertUnlocked?"0 8px 32px #FF5E8A18":"none",
+          opacity:expertUnlocked?1:0.5 }}>
+          <div style={{ fontSize:10,letterSpacing:3,color:expertUnlocked?"#FF5E8A":"#555",textTransform:"uppercase",marginBottom:6 }}>Mode</div>
+          <div style={{ fontSize:24,fontWeight:900,color:"#F5F0E8",letterSpacing:2,marginBottom:10 }}>
+            EXPERT {!expertUnlocked && <span style={{ fontSize:14,color:"#555" }}>🔒</span>}
+          </div>
+          <div style={{ fontSize:12,color:"#666",lineHeight:1.7 }}>
+            ✦ Coups limités (+10%)<br/>
+            ✦ Compte à rebours 3 minutes<br/>
+            {expertUnlocked ? "✦ Mode débloqué !" : "✦ Terminer les 10 niveaux Normal"}
+          </div>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ───────────────────────────────────────────────────────────────────
 export default function Blokiq() {
-  const [grid, setGrid] = useState(generateGrid);
+  const [screen, setScreen] = useState("menu");
+  const [mode, setMode] = useState("normal");
+  const [level, setLevel] = useState(0); // 0-9
+  const [grid, setGrid] = useState(null);
+  const [moveLimit, setMoveLimit] = useState(0);
   const [moves, setMoves] = useState(0);
-  const [won, setWon] = useState(false);
-  const [flashRow, setFlashRow] = useState(null);
+  const [history, setHistory] = useState([]); // last 3 grids
+  const [retryAvailable, setRetryAvailable] = useState(true);
+  const [currentMargin, setCurrentMargin] = useState(0);
+  const [bonuses, setBonuses] = useState([]);
+  const [levelsWon, setLevelsWon] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(EXPERT_TIME);
+  const [gameStatus, setGameStatus] = useState("playing"); // playing|won|lost|gameover
+  const [expertUnlocked, setExpertUnlocked] = useState(() => localStorage.getItem("blokiq_expert") === "1");
+  const [showBonus, setShowBonus] = useState(null); // bonus earned notification
+  const timerRef = useRef(null);
 
-  const doMove = useCallback((newGrid, rowFlash) => {
-    if (won) return;
-    setGrid(newGrid);
-    setMoves(m => m + 1);
-    if (rowFlash !== undefined) {
-      setFlashRow(rowFlash);
-      setTimeout(() => setFlashRow(null), 130);
-    }
-    if (checkWin(newGrid)) setTimeout(() => setWon(true), 180);
-  }, [won]);
-
-  const reset = () => {
-    setGrid(generateGrid());
+  const loadLevel = useCallback((lvl, margin, retryFlag=true) => {
+    const { grid: g, moveLimit: ml } = generateGrid(margin);
+    setLevel(lvl);
+    setCurrentMargin(margin);
+    setGrid(g);
+    setMoveLimit(ml);
     setMoves(0);
-    setWon(false);
-    setFlashRow(null);
-  };
+    setHistory([]);
+    setRetryAvailable(retryFlag);
+    setTimeLeft(EXPERT_TIME);
+    setGameStatus("playing");
+  }, []);
+
+  const startGame = useCallback((selectedMode) => {
+    setMode(selectedMode);
+    setBonuses([]);
+    setLevelsWon(0);
+    if (selectedMode === "normal") {
+      loadLevel(0, LEVEL_MARGINS[0]);
+    } else {
+      loadLevel(0, 0.10);
+    }
+    setScreen("game");
+  }, [loadLevel]);
+
+  // Timer (expert)
+  useEffect(() => {
+    if (screen !== "game" || mode !== "expert" || gameStatus !== "playing") {
+      clearInterval(timerRef.current); return;
+    }
+    timerRef.current = setInterval(() => {
+      setTimeLeft(t => {
+        if (t <= 1) { clearInterval(timerRef.current); setGameStatus("lost"); return 0; }
+        return t - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, [screen, mode, gameStatus]);
+
+  const doMove = useCallback((newGrid, newHistory) => {
+    if (gameStatus !== "playing") return;
+    const newMoves = moves + 1;
+    setGrid(newGrid);
+    setMoves(newMoves);
+    setHistory(newHistory);
+    if (checkWin(newGrid)) {
+      clearInterval(timerRef.current);
+      setTimeout(() => setGameStatus("won"), 180);
+    } else if (newMoves >= moveLimit) {
+      clearInterval(timerRef.current);
+      setTimeout(() => setGameStatus("lost"), 180);
+    }
+  }, [gameStatus, moves, moveLimit]);
+
+  const makeMove = useCallback((newGrid) => {
+    const newHistory = [grid, ...history].slice(0, 3);
+    doMove(newGrid, newHistory);
+  }, [grid, history, doMove]);
+
+  // Use bonus
+  const useBonus = useCallback((type, fromRetry=false) => {
+    setBonuses(b => {
+      const idx = b.indexOf(type);
+      if (idx === -1) return b;
+      return [...b.slice(0,idx), ...b.slice(idx+1)];
+    });
+    if (type === "extra_move") {
+      setMoveLimit(ml => ml + 1);
+    } else if (type === "solve_line") {
+      setGrid(g => solveBestRow(g));
+    } else if (type === "undo_3") {
+      if (history.length > 0) {
+        const target = history[Math.min(2, history.length-1)];
+        setGrid(target);
+        setMoves(m => Math.max(0, m - history.length));
+        setHistory([]);
+      }
+    }
+    if (fromRetry) setRetryAvailable(true); // give retry back after bonus used
+  }, [history]);
+
+  // Handle win
+  const handleWin = useCallback(() => {
+    const newLevelsWon = levelsWon + 1;
+    setLevelsWon(newLevelsWon);
+    // Award bonus every 2 levels
+    let newBonus = null;
+    if (newLevelsWon % 2 === 0) {
+      newBonus = randomBonus();
+      setBonuses(b => [...b, newBonus]);
+      setShowBonus(newBonus);
+      setTimeout(() => setShowBonus(null), 2500);
+    }
+    // Check expert unlock (normal mode, level 9 = last)
+    if (mode === "normal" && level === 9) {
+      localStorage.setItem("blokiq_expert", "1");
+      setExpertUnlocked(true);
+    }
+  }, [levelsWon, mode, level]);
+
+  useEffect(() => {
+    if (gameStatus === "won") handleWin();
+  }, [gameStatus]);
+
+  const goNextLevel = useCallback(() => {
+    if (mode === "normal") {
+      const nextLevel = level + 1;
+      if (nextLevel >= 10) {
+        setScreen("menu"); return;
+      }
+      loadLevel(nextLevel, LEVEL_MARGINS[nextLevel]);
+    } else {
+      loadLevel(0, 0.10);
+    }
+  }, [mode, level, loadLevel]);
+
+  const handleRetry = useCallback(() => {
+    const reducedMargin = Math.max(0.10, currentMargin - 0.01);
+    loadLevel(level, reducedMargin, false); // retryAvailable = false
+  }, [level, currentMargin, loadLevel]);
+
+  const handleLost = useCallback(() => {
+    if (retryAvailable) {
+      // Show retry option
+      return;
+    }
+    // No retry left — check for bonus
+    if (bonuses.length > 0) {
+      const b = bonuses[0];
+      useBonus(b, true);
+      // reload same level
+      loadLevel(level, currentMargin, false);
+    } else {
+      setGameStatus("gameover");
+    }
+  }, [retryAvailable, bonuses, useBonus, level, currentMargin, loadLevel]);
+
+  const disabled = gameStatus !== "playing";
+  const movesLeft = moveLimit - moves;
+  const timerDanger = mode === "expert" && timeLeft <= 30;
+
+  if (screen === "menu") return <Menu onStart={startGame} expertUnlocked={expertUnlocked} />;
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      background: "linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
-      display: "flex", flexDirection: "column", alignItems: "center",
-      padding: "28px 16px 48px",
-      fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-      color: "#F5F0E8",
-      userSelect: "none",
-      WebkitUserSelect: "none",
-    }}>
+    <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
+      "--blk": "min(46px, calc((100vw - 100px) / 7.2))",
+      background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
+      display:"flex",flexDirection:"column",alignItems:"center",
+      padding:"16px 12px 48px",
+      fontFamily:"'Segoe UI', system-ui, sans-serif",
+      color:"#F5F0E8",userSelect:"none",WebkitUserSelect:"none" }}>
+
+      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden}`}</style>
+
 
       {/* Logo */}
-      <div style={{ textAlign: "center", marginBottom: 6 }}>
-        <div style={{ fontSize: 48, fontWeight: 900, letterSpacing: 6, lineHeight: 1 }}>
-          BLOK<span style={{ color: "#E8C547" }}>IQ</span>
+      <div style={{ textAlign:"center",marginBottom:4 }}>
+        <div style={{ fontSize:38,fontWeight:900,letterSpacing:6,lineHeight:1 }}>
+          BLOK<span style={{ color:"#E8C547" }}>IQ</span>
         </div>
-        <div style={{ fontSize: 10, letterSpacing: 4, color: "#555", textTransform: "uppercase", marginTop: 3 }}>
+        <div style={{ fontSize:9,letterSpacing:4,color:"#555",textTransform:"uppercase",marginTop:2 }}>
           by aluQ entertainment
         </div>
       </div>
 
-      {/* Moves */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 10,
-        background: "#ffffff0A", padding: "7px 22px",
-        borderRadius: 20, border: "1px solid #ffffff10",
-        marginBottom: 24,
-      }}>
-        <span style={{ fontSize: 10, letterSpacing: 3, color: "#666", textTransform: "uppercase" }}>Coups</span>
-        <span style={{ fontSize: 24, fontWeight: 800, color: "#E8C547", minWidth: 32, textAlign: "center" }}>{moves}</span>
-      </div>
-
-      {/* Board */}
-      <div style={{
-        background: "linear-gradient(180deg, #282840, #1E1E34)",
-        borderRadius: 18,
-        padding: "14px 12px",
-        boxShadow: "0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
-        border: "1px solid #ffffff0A",
-      }}>
-
-        {/* Col up arrows */}
-        <div style={{ display: "flex", gap: 4, marginBottom: 4, paddingLeft: 20 }}>
-          <div style={{ width: 4 }} />
-          {Array.from({ length: GRID_SIZE }, (_, c) => (
-            <ArrowBtn key={c} label="▲" onClick={() => doMove(slideColUp(grid, c))} horizontal={false} />
+      {/* Level bar (normal) */}
+      {mode === "normal" && (
+        <div style={{ display:"flex",gap:6,marginBottom:10,marginTop:4 }}>
+          {Array.from({length:10},(_,i)=>(
+            <div key={i} style={{ width:20,height:4,borderRadius:2,
+              background: i < level ? "#22CC66" : i === level ? "#E8C547" : "#ffffff15" }} />
           ))}
-        </div>
-
-        {/* Rows */}
-        {grid.map((row, r) => (
-          <div key={r} style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 4 }}>
-            {/* Target pip */}
-            <div style={{
-              width: 10, height: 46, borderRadius: 5,
-              background: COLORS[r].hex,
-              boxShadow: `0 0 10px ${COLORS[r].hex}88`,
-              flexShrink: 0,
-              marginRight: 4,
-            }} />
-
-            {/* Left arrow */}
-            <ArrowBtn label="◄" onClick={() => doMove(slideRowLeft(grid, r), r)} horizontal={true} />
-
-            {/* Blocks */}
-            {row.map((cid, c) => (
-              <LegoBlock key={c} colorId={cid} flash={flashRow === r} />
-            ))}
-
-            {/* Right arrow */}
-            <ArrowBtn label="►" onClick={() => doMove(slideRowRight(grid, r), r)} horizontal={true} />
-          </div>
-        ))}
-
-        {/* Col down arrows */}
-        <div style={{ display: "flex", gap: 4, marginTop: 0, paddingLeft: 20 }}>
-          <div style={{ width: 4 }} />
-          {Array.from({ length: GRID_SIZE }, (_, c) => (
-            <ArrowBtn key={c} label="▼" onClick={() => doMove(slideColDown(grid, c))} horizontal={false} />
-          ))}
-        </div>
-      </div>
-
-      {/* Hint */}
-      <div style={{ fontSize: 11, color: "#444", marginTop: 16, letterSpacing: 1, textAlign: "center" }}>
-        Aligne chaque ligne avec sa couleur ◄ ►
-      </div>
-
-      {/* Reset */}
-      <button onClick={reset} style={{
-        marginTop: 20,
-        padding: "10px 28px",
-        background: "transparent",
-        border: "1px solid #ffffff15",
-        borderRadius: 10,
-        color: "#555",
-        fontSize: 11,
-        letterSpacing: 3,
-        textTransform: "uppercase",
-        cursor: "pointer",
-        transition: "all 0.2s",
-      }}>
-        Nouvelle partie
-      </button>
-
-      {/* Win overlay */}
-      {won && (
-        <div style={{
-          position: "fixed", inset: 0,
-          background: "#00000090",
-          backdropFilter: "blur(6px)",
-          WebkitBackdropFilter: "blur(6px)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          zIndex: 100,
-        }}>
-          <div style={{
-            background: "linear-gradient(145deg, #1A1A30, #2A2A45)",
-            border: "1px solid #E8C54740",
-            borderRadius: 28,
-            padding: "44px 52px",
-            textAlign: "center",
-            boxShadow: "0 30px 80px #000000AA, 0 0 0 1px #E8C54720",
-          }}>
-            <div style={{ fontSize: 52, marginBottom: 10 }}>🏆</div>
-            <div style={{ fontSize: 38, fontWeight: 900, letterSpacing: 5, color: "#E8C547" }}>BRAVO !</div>
-            <div style={{ fontSize: 15, color: "#666", marginTop: 10, marginBottom: 32, letterSpacing: 1 }}>
-              Résolu en <span style={{ color: "#F5F0E8", fontWeight: 700 }}>{moves}</span> coups
-            </div>
-            <button onClick={reset} style={{
-              padding: "14px 44px",
-              background: "linear-gradient(135deg, #E8C547, #C8A020)",
-              border: "none",
-              borderRadius: 14,
-              color: "#0D0D1C",
-              fontSize: 13,
-              fontWeight: 900,
-              letterSpacing: 4,
-              cursor: "pointer",
-              textTransform: "uppercase",
-              boxShadow: "0 4px 20px #E8C54760",
-            }}>
-              REJOUER
-            </button>
-          </div>
         </div>
       )}
 
+      {/* Stats bar */}
+      <div style={{ display:"flex",alignItems:"center",gap:16,
+        background:"#ffffff0A",padding:"7px 20px",borderRadius:20,
+        border:"1px solid #ffffff10",marginBottom:16,flexWrap:"wrap",justifyContent:"center" }}>
+        <div style={{ fontSize:9,letterSpacing:3,textTransform:"uppercase",fontWeight:700,
+          color:mode==="expert"?"#FF5E8A":"#3399FF",padding:"3px 10px",borderRadius:10,
+          background:mode==="expert"?"#FF5E8A18":"#3399FF18",
+          border:`1px solid ${mode==="expert"?"#FF5E8A44":"#3399FF44"}` }}>
+          {mode === "normal" ? `NV. ${level+1}/10` : "EXPERT"}
+        </div>
+        <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+          <span style={{ fontSize:9,letterSpacing:2,color:"#555",textTransform:"uppercase" }}>Coups</span>
+          <span style={{ fontSize:20,fontWeight:800,color:movesLeft<=3?"#FF4040":"#E8C547" }}>{movesLeft}</span>
+        </div>
+        {mode === "expert" && (
+          <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+            <span style={{ fontSize:9,letterSpacing:2,color:"#555",textTransform:"uppercase" }}>Temps</span>
+            <span style={{ fontSize:20,fontWeight:800,
+              color:timerDanger?"#FF4040":"#F5F0E8",
+              animation:timerDanger?"pulse 0.6s ease-in-out infinite":"none" }}>
+              {formatTime(timeLeft)}
+            </span>
+          </div>
+        )}
+        {bonuses.length > 0 && (
+          <div style={{ fontSize:10,color:"#E8C547" }}>🎁 ×{bonuses.length}</div>
+        )}
+      </div>
+
+      {/* Board */}
+      <div style={{ background:"linear-gradient(180deg, #282840, #1E1E34)",borderRadius:18,
+        padding:"10px 8px",boxShadow:"0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
+        border:"1px solid #ffffff0A", maxWidth:"100%" }}>
+        <div style={{ display:"flex",gap:4,marginBottom:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▲" disabled={disabled} onClick={()=>makeMove(slideColUp(grid,c))} horizontal={false} />
+          ))}
+        </div>
+        {grid && grid.map((row,r)=>(
+          <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
+            <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
+              boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
+            <ArrowBtn label="◄" disabled={disabled} onClick={()=>makeMove(slideRowLeft(grid,r))} horizontal={true} />
+            {row.map((cid,c)=><LegoBlock key={c} colorId={cid} />)}
+            <ArrowBtn label="►" disabled={disabled} onClick={()=>makeMove(slideRowRight(grid,r))} horizontal={true} />
+          </div>
+        ))}
+        <div style={{ display:"flex",gap:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▼" disabled={disabled} onClick={()=>makeMove(slideColDown(grid,c))} horizontal={false} />
+          ))}
+        </div>
+      </div>
+
+      {/* Bonus buttons */}
+      {bonuses.length > 0 && gameStatus === "playing" && (
+        <div style={{ display:"flex",gap:8,marginTop:12,flexWrap:"wrap",justifyContent:"center" }}>
+          {[...new Set(bonuses)].map(b=>(
+            <button key={b} onClick={()=>useBonus(b)} style={{ padding:"7px 14px",
+              background:"#E8C54715",border:"1px solid #E8C54744",borderRadius:10,
+              color:"#E8C547",fontSize:11,cursor:"pointer",letterSpacing:1 }}>
+              {BONUS_LABELS[b]}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize:10,color:"#333",marginTop:10,letterSpacing:1 }}>
+        Aligne chaque ligne avec sa couleur
+      </div>
+      <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
+        background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
+        color:"#333",fontSize:9,letterSpacing:3,textTransform:"uppercase",cursor:"pointer" }}>
+        Menu
+      </button>
+
+      {/* Bonus earned notification */}
+      {showBonus && (
+        <div style={{ position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",
+          background:"#1A1A30",border:"1px solid #E8C54760",borderRadius:14,
+          padding:"12px 24px",fontSize:13,color:"#E8C547",zIndex:200,
+          boxShadow:"0 8px 32px #00000088",textAlign:"center" }}>
+          Bonus gagné !<br/><span style={{ fontSize:15 }}>{BONUS_LABELS[showBonus]}</span>
+        </div>
+      )}
+
+      {/* WIN overlay */}
+      {gameStatus === "won" && (
+        <Overlay>
+          <div style={{ fontSize:48,marginBottom:8 }}>🏆</div>
+          <div style={{ fontSize:34,fontWeight:900,letterSpacing:5,color:"#E8C547" }}>BRAVO !</div>
+          <div style={{ fontSize:13,color:"#666",marginTop:8,marginBottom:8 }}>
+            Niveau {level+1} · {moves} coups
+            {mode==="expert" && ` · ${formatTime(EXPERT_TIME-timeLeft)}`}
+          </div>
+          {mode==="normal" && level===9 && (
+            <div style={{ fontSize:12,color:"#FF5E8A",marginBottom:12,letterSpacing:1 }}>
+              🎉 Mode Expert débloqué !
+            </div>
+          )}
+          <div style={{ display:"flex",gap:10,justifyContent:"center",marginTop:20 }}>
+            {mode==="normal" && level<9
+              ? <OBtn label="SUIVANT →" color="#E8C547" onClick={goNextLevel} />
+              : <OBtn label="REJOUER" color="#E8C547" onClick={()=>startGame(mode)} />
+            }
+            <OBtn label="MENU" color="#3399FF" onClick={()=>setScreen("menu")} />
+          </div>
+        </Overlay>
+      )}
+
+      {/* LOST overlay */}
+      {gameStatus === "lost" && (
+        <Overlay>
+          <div style={{ fontSize:48,marginBottom:8 }}>😤</div>
+          <div style={{ fontSize:28,fontWeight:900,letterSpacing:4,color:"#FF4040" }}>
+            {movesLeft <= 0 ? "Plus de coups !" : "Temps écoulé !"}
+          </div>
+          <div style={{ fontSize:12,color:"#555",marginTop:8,marginBottom:20 }}>
+            {retryAvailable
+              ? `Marge réduite de 1% — ${bonuses.length} bonus disponible${bonuses.length>1?"s":""}`
+              : bonuses.length > 0
+                ? `Bonus "${BONUS_LABELS[bonuses[0]]}" utilisé automatiquement`
+                : "Aucun bonus disponible"}
+          </div>
+          <div style={{ display:"flex",gap:10,justifyContent:"center",flexWrap:"wrap" }}>
+            {retryAvailable && <OBtn label="RETRY −1%" color="#FF7020" onClick={handleRetry} />}
+            {!retryAvailable && bonuses.length > 0 && <OBtn label="UTILISER BONUS" color="#E8C547" onClick={handleLost} />}
+            {(!retryAvailable && bonuses.length === 0) && <OBtn label="GAME OVER" color="#FF4040" onClick={()=>setGameStatus("gameover")} />}
+            <OBtn label="MENU" color="#3399FF" onClick={()=>setScreen("menu")} />
+          </div>
+        </Overlay>
+      )}
+
+      {/* GAME OVER overlay */}
+      {gameStatus === "gameover" && (
+        <Overlay>
+          <div style={{ fontSize:48,marginBottom:8 }}>💀</div>
+          <div style={{ fontSize:28,fontWeight:900,letterSpacing:4,color:"#FF4040" }}>GAME OVER</div>
+          <div style={{ fontSize:12,color:"#555",marginTop:8,marginBottom:24,lineHeight:1.7 }}>
+            Plus de retry ni de bonus.<br/>La campagne recommence depuis le début.
+          </div>
+          <OBtn label="RECOMMENCER" color="#FF4040" onClick={()=>startGame("normal")} />
+        </Overlay>
+      )}
+
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
     </div>
   );
 }
