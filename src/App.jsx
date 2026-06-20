@@ -15,63 +15,38 @@ const COLORS = [
   { id: 5, hex: "#3399FF", dark: "#1166CC", light: "#88CCFF" },
 ];
 
-// ── Core slide physics ──────────────────────────────────────────────────────────
-// A block slides until it hits a wall or another block. Column 0 (the
-// reference/gate of its row) only lets a MATCHING color through — it passes
-// straight through and exits. A non-matching color simply can't enter column 0
-// at all: it's treated as a wall and stops at column 1.
-function computeSlide(grid, r, c, dir) {
+// ── Core movement physics ───────────────────────────────────────────────────────
+// Every press moves the selected block by exactly ONE cell — no multi-cell
+// shortcuts. The only "jump" is the exit itself: stepping onto a cell that IS
+// its own row's reference (column 0, matching color) sends it straight out,
+// and that single press counts as the move. Stepping toward a non-matching
+// row's column 0 is simply blocked, like a wall.
+function computeStep(grid, r, c, dir) {
   const color = grid[r][c];
   if (color === null) return { type: "none" };
 
-  if (dir === "left") {
-    let cc = c;
-    while (true) {
-      const next = cc - 1;
-      if (next < 0) {
-        if (color === r) return { type: "exit" };
-        return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
-      }
-      if (next === 0) {
-        if (color === r) return { type: "exit" }; // passes straight through the gate
-        return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } }; // wall for wrong color
-      }
-      if (grid[r][next] !== null) return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
-      cc = next;
-    }
+  let nr = r, nc = c;
+  if (dir === "left") nc = c - 1;
+  else if (dir === "right") nc = c + 1;
+  else if (dir === "up") nr = r - 1;
+  else if (dir === "down") nr = r + 1;
+
+  if (nc < 0) {
+    // stepping left off the board only happens from column 0 — the gate
+    if (color === r) return { type: "exit" };
+    return { type: "none" };
   }
-  if (dir === "right") {
-    let cc = c;
-    while (cc + 1 <= GRID_SIZE - 1 && grid[r][cc + 1] === null) cc++;
-    return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
+  if (nc > GRID_SIZE - 1 || nr < 0 || nr > GRID_SIZE - 1) return { type: "none" };
+
+  if (nc === 0) {
+    // stepping into column 0 of (possibly another) row r — only that row's
+    // own color may enter, and arriving there immediately sends it out
+    if (color === nr) return { type: "exit" };
+    return { type: "none" };
   }
-  if (dir === "up") {
-    let rr = r;
-    while (true) {
-      const next = rr - 1;
-      if (next < 0) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-      if (c === 0) {
-        if (color === next) return { type: "exit" }; // arrives exactly at its own gate
-        return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } }; // can't enter another row's gate
-      }
-      if (grid[next][c] !== null) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-      rr = next;
-    }
-  }
-  if (dir === "down") {
-    let rr = r;
-    while (true) {
-      const next = rr + 1;
-      if (next > GRID_SIZE - 1) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-      if (c === 0) {
-        if (color === next) return { type: "exit" };
-        return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-      }
-      if (grid[next][c] !== null) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-      rr = next;
-    }
-  }
-  return { type: "none" };
+
+  if (grid[nr][nc] !== null) return { type: "none" }; // blocked by another block
+  return { type: "move", to: { r: nr, c: nc } };
 }
 
 function emptyGrid() { return Array.from({length:GRID_SIZE}, ()=>Array(GRID_SIZE).fill(null)); }
@@ -83,47 +58,32 @@ function formatTime(s) { return `${Math.floor(s/60)}:${(s%60).toString().padStar
 // slide physics the player uses (only ever accepting a "move", never an
 // "exit", during setup). Reversing that exact sequence always works, so every
 // board is guaranteed solvable, and the move count gives a real baseline.
-function hasImmediateExit(grid) {
-  for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) {
-    if (grid[r][c] === null) continue;
-    if (computeSlide(grid, r, c, "left").type === "exit") return true;
-  }
-  return false;
-}
-
-// Single-hole "15-puzzle" generation: scramble with exactly ONE empty cell
-// the whole time, then plug that last remaining hole at the very end — the
-// board the player sees is genuinely 36/36 full, with zero empty cells.
-// IMPORTANT: scrambling uses plain, unconditional neighbor swaps — the
-// gameplay gate rule (wrong colors can't enter column 0) is a PLAYING rule,
-// not a setup rule, so it's deliberately not applied here. A piece can
-// always be freely repositioned away later via a normal "right" slide, so
-// this doesn't break solvability — it's what actually produces a real
-// shuffle instead of leaving the board looking pre-solved.
+// Single-hole "15-puzzle" generation, with the reference column (column 0)
+// protected from ever being disturbed by the scramble — so every row's gate
+// always holds its own correct color, from the very first frame, by
+// construction. Columns 1-5 (30 cells) get a genuine, thorough shuffle.
+// The board the player sees is always 36/36 full.
 function generatePuzzle(margin) {
-  let grid, scrambleTarget;
-  for (let attempt=0; attempt<8; attempt++) {
-    grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
-    const holeRow = Math.floor(Math.random()*GRID_SIZE);
-    const heldColor = grid[holeRow][0];
-    let hole = { r: holeRow, c: 0 };
-    grid[hole.r][hole.c] = null;
+  let grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+  const holeRow = Math.floor(Math.random()*GRID_SIZE);
+  const heldColor = grid[holeRow][0];
+  let hole = { r: holeRow, c: 0 };
+  grid[hole.r][hole.c] = null;
 
-    scrambleTarget = 150 + Math.floor(Math.random()*150);
-    for (let i=0; i<scrambleTarget; i++) {
-      const neighbors = [
-        { r: hole.r-1, c: hole.c }, { r: hole.r+1, c: hole.c },
-        { r: hole.r, c: hole.c-1 }, { r: hole.r, c: hole.c+1 },
-      ].filter(p => p.r>=0 && p.r<GRID_SIZE && p.c>=0 && p.c<GRID_SIZE);
-      const pick = neighbors[Math.floor(Math.random()*neighbors.length)];
-      grid[hole.r][hole.c] = grid[pick.r][pick.c];
-      grid[pick.r][pick.c] = null;
-      hole = pick;
-    }
-    grid[hole.r][hole.c] = heldColor;
-
-    if (hasImmediateExit(grid) || attempt === 7) break;
+  const scrambleTarget = 150 + Math.floor(Math.random()*150);
+  for (let i=0; i<scrambleTarget; i++) {
+    const neighbors = [
+      { r: hole.r-1, c: hole.c }, { r: hole.r+1, c: hole.c },
+      { r: hole.r, c: hole.c-1 }, { r: hole.r, c: hole.c+1 },
+    ].filter(p => p.r>=0 && p.r<GRID_SIZE && p.c>=1 && p.c<GRID_SIZE); // c>=1: never touch the gate column
+    if (neighbors.length===0) continue;
+    const pick = neighbors[Math.floor(Math.random()*neighbors.length)];
+    grid[hole.r][hole.c] = grid[pick.r][pick.c];
+    grid[pick.r][pick.c] = null;
+    hole = pick;
   }
+
+  grid[hole.r][hole.c] = heldColor; // plug the last hole — fully packed now
 
   const baseline = scrambleTarget + GRID_SIZE*GRID_SIZE;
   return { grid, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
@@ -326,7 +286,7 @@ export default function Blokiq() {
     if (!selected || gameStatus !== "playing") return;
     const { r, c } = selected;
     setGrid(currentGrid => {
-      const result = computeSlide(currentGrid, r, c, dir);
+      const result = computeStep(currentGrid, r, c, dir);
       if (result.type === "none") return currentGrid;
 
       setHistory(h => [currentGrid.map(row=>[...row]), ...h].slice(0,3));
