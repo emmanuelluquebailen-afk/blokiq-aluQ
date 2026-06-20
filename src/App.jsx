@@ -79,7 +79,8 @@ function ArrowBtn({ label, onClick, horizontal, disabled }) {
   return (
     <button disabled={disabled}
       onMouseDown={()=>setActive(true)} onMouseUp={()=>setActive(false)} onMouseLeave={()=>setActive(false)}
-      onTouchStart={()=>setActive(true)} onTouchEnd={()=>{setActive(false);if(!disabled)onClick();}}
+      onTouchStart={()=>setActive(true)}
+      onTouchEnd={(e)=>{ e.preventDefault(); setActive(false); if(!disabled) onClick(); }}
       onClick={onClick}
       style={{ width:horizontal?"calc(var(--blk) * 0.565)":"var(--blk)",
         height:horizontal?"var(--blk)":"calc(var(--blk) * 0.565)",
@@ -87,7 +88,7 @@ function ArrowBtn({ label, onClick, horizontal, disabled }) {
         borderRadius:6, color:disabled?"#333":(active?"#E8C547":"#aaaaaa"), fontSize:11, fontWeight:700,
         cursor:disabled?"default":"pointer", display:"flex", alignItems:"center", justifyContent:"center",
         transform:active?"scale(0.93)":"scale(1)", transition:"all 0.1s", padding:0, flexShrink:0,
-        opacity:disabled?0.3:1 }}>
+        opacity:disabled?0.3:1, touchAction:"manipulation" }}>
       {label}
     </button>
   );
