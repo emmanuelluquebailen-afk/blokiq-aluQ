@@ -174,7 +174,7 @@ function EmptySlot() {
     border:"1.5px dashed #ffffff14", background:"#ffffff05", flexShrink:0 }} />;
 }
 
-function DPadBtn({ label, onClick, disabled }) {
+function ArrowBtn({ label, onClick, horizontal, disabled }) {
   const [active, setActive] = useState(false);
   return (
     <button disabled={disabled}
@@ -182,12 +182,13 @@ function DPadBtn({ label, onClick, disabled }) {
       onTouchStart={()=>setActive(true)}
       onTouchEnd={(e)=>{ e.preventDefault(); setActive(false); if(!disabled) onClick(); }}
       onClick={onClick}
-      style={{ width:"min(54px, calc(var(--blk) * 1.15))", height:"min(54px, calc(var(--blk) * 1.15))",
+      style={{ width:horizontal?"calc(var(--blk) * 0.55)":"var(--blk)",
+        height:horizontal?"var(--blk)":"calc(var(--blk) * 0.55)",
         background:active?"#E8C54740":"#ffffff10", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
-        borderRadius:10, color:disabled?"#333":(active?"#E8C547":"#ccc"), fontSize:18, fontWeight:700,
+        borderRadius:7, color:disabled?"#333":(active?"#E8C547":"#ccc"), fontSize:14, fontWeight:700,
         cursor:disabled?"default":"pointer", display:"flex",alignItems:"center",justifyContent:"center",
-        transform:active?"scale(0.92)":"scale(1)", transition:"all 0.1s",
-        opacity:disabled?0.25:1, touchAction:"manipulation" }}>
+        transform:active?"scale(0.92)":"scale(1)", transition:"all 0.1s", padding:0, flexShrink:0,
+        opacity:disabled?0.2:1, touchAction:"manipulation" }}>
       {label}
     </button>
   );
@@ -436,7 +437,7 @@ export default function Blokiq() {
 
   return (
     <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
-      "--blk": "min(46px, calc((100vw - 90px) / 6))",
+      "--blk": "min(46px, calc((100vw - 90px) / 7.1))",
       background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
       display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       padding:"16px 12px 48px",
@@ -492,40 +493,51 @@ export default function Blokiq() {
         {bonuses.length > 0 && <div style={{ fontSize:10,color:"#E8C547" }}>🎁 ×{bonuses.length}</div>}
       </div>
 
-      {/* Board */}
+      {/* Board with frame arrows — only the row/column of the selected block lights up */}
       <div style={{ background:"linear-gradient(180deg, #282840, #1E1E34)",borderRadius:18,
         padding:"10px 8px",boxShadow:"0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
         border:"1px solid #ffffff0A", maxWidth:"100%" }}>
+
+        {/* Column up arrows */}
+        <div style={{ display:"flex",gap:4,marginBottom:4,paddingLeft:"calc(22px + var(--blk) * 0.55)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▲" horizontal={false}
+              disabled={disabled || !selected || selected.c!==c}
+              onClick={()=>handleDirection("up")} />
+          ))}
+        </div>
+
         {grid && grid.map((row,r)=>(
           <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
             <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
               boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
+            <ArrowBtn label="◄" horizontal={true}
+              disabled={disabled || !selected || selected.r!==r}
+              onClick={()=>handleDirection("left")} />
             {row.map((cid,c)=> cid===null
               ? <EmptySlot key={c} />
               : <LegoBlock key={c} colorId={cid}
                   selected={selected && selected.r===r && selected.c===c}
                   onTap={()=>tapBlock(r,c)} />
             )}
+            <ArrowBtn label="►" horizontal={true}
+              disabled={disabled || !selected || selected.r!==r}
+              onClick={()=>handleDirection("right")} />
           </div>
         ))}
-      </div>
 
-      {/* D-Pad */}
-      <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:4,marginTop:16 }}>
-        <DPadBtn label="▲" disabled={disabled||!selected} onClick={()=>handleDirection("up")} />
-        <div style={{ display:"flex",gap:4 }}>
-          <DPadBtn label="◄" disabled={disabled||!selected} onClick={()=>handleDirection("left")} />
-          <div style={{ width:"min(54px, calc(var(--blk) * 1.15))",height:"min(54px, calc(var(--blk) * 1.15))",
-            display:"flex",alignItems:"center",justifyContent:"center" }}>
-            {selected && <div style={{ width:10,height:10,borderRadius:"50%",background:"#E8C547" }} />}
-          </div>
-          <DPadBtn label="►" disabled={disabled||!selected} onClick={()=>handleDirection("right")} />
+        {/* Column down arrows */}
+        <div style={{ display:"flex",gap:4,paddingLeft:"calc(22px + var(--blk) * 0.55)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▼" horizontal={false}
+              disabled={disabled || !selected || selected.c!==c}
+              onClick={()=>handleDirection("down")} />
+          ))}
         </div>
-        <DPadBtn label="▼" disabled={disabled||!selected} onClick={()=>handleDirection("down")} />
       </div>
 
       <div style={{ fontSize:10,color:"#444",marginTop:14,letterSpacing:1,textAlign:"center" }}>
-        {selected ? "Touche une direction — il sort tout seul s'il atteint sa couleur" : "Touche un bloc pour le sélectionner"}
+        {selected ? "Touche une flèche — il sort tout seul s'il atteint sa couleur" : "Touche un bloc pour le sélectionner"}
       </div>
       <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
         background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
