@@ -124,7 +124,7 @@ function Menu({ onStart, expertUnlocked }) {
       background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
       display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       padding:"40px 24px", fontFamily:"'Segoe UI', system-ui, sans-serif", color:"#F5F0E8" }}>
-      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden}`}</style>
+      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden;background:#0D0D1C;min-height:100%}`}</style>
       <div style={{ fontSize:52,fontWeight:900,letterSpacing:6,lineHeight:1,marginBottom:6 }}>
         BLOK<span style={{ color:"#E8C547" }}>IQ</span>
       </div>
@@ -330,12 +330,12 @@ export default function Blokiq() {
     <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
       "--blk": "min(46px, calc((100vw - 100px) / 7.2))",
       background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
-      display:"flex",flexDirection:"column",alignItems:"center",
+      display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       padding:"16px 12px 48px",
       fontFamily:"'Segoe UI', system-ui, sans-serif",
       color:"#F5F0E8",userSelect:"none",WebkitUserSelect:"none" }}>
 
-      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden}`}</style>
+      <style>{`*{box-sizing:border-box} html,body{margin:0;overflow-x:hidden;background:#0D0D1C;min-height:100%}`}</style>
 
 
       {/* Logo */}
