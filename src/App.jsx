@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 const GRID_SIZE = 6;
 const EXPERT_TIME = 180;
-const EMPTY_CELLS_START = 4; // minimum needed for the board to be movable at all
 const LEVEL_MARGINS = [0.25, 0.25, 0.22, 0.22, 0.20, 0.20, 0.15, 0.15, 0.10, 0.10];
 const BONUS_TYPES = ["extra_move", "remove_block", "undo_3"];
 const BONUS_LABELS = { extra_move: "🎯 +1 Coup", remove_block: "🧹 Retirer un bloc", undo_3: "↩️ Annuler 3 coups" };
@@ -48,13 +47,29 @@ function computeSlide(grid, r, c, dir) {
   }
   if (dir === "up") {
     let rr = r;
-    while (rr - 1 >= 0 && grid[rr - 1][c] === null) rr--;
-    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+    while (true) {
+      const next = rr - 1;
+      if (next < 0) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+      if (c === 0) {
+        if (color === next) return { type: "exit" }; // arrives exactly at its own gate
+        return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } }; // can't enter another row's gate
+      }
+      if (grid[next][c] !== null) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+      rr = next;
+    }
   }
   if (dir === "down") {
     let rr = r;
-    while (rr + 1 <= GRID_SIZE - 1 && grid[rr + 1][c] === null) rr++;
-    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+    while (true) {
+      const next = rr + 1;
+      if (next > GRID_SIZE - 1) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+      if (c === 0) {
+        if (color === next) return { type: "exit" };
+        return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+      }
+      if (grid[next][c] !== null) return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
+      rr = next;
+    }
   }
   return { type: "none" };
 }
@@ -76,43 +91,46 @@ function hasImmediateExit(grid) {
   return false;
 }
 
+// Single-hole "15-puzzle" generation: scramble with exactly ONE empty cell
+// the whole time (so every scramble step is a real, reversible legal move),
+// then plug that last remaining hole at the very end — the board the player
+// sees is genuinely 36/36 full, with zero empty cells.
 function generatePuzzle(margin) {
-  // Regenerate (rare) if the very first board has no immediately-available
-  // move — the player should always be able to send at least one block home
-  // right away.
-  for (let attempt=0; attempt<6; attempt++) {
+  for (let attempt=0; attempt<10; attempt++) {
     let grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+    const holeRow = Math.floor(Math.random()*GRID_SIZE);
+    const heldColor = grid[holeRow][0];
+    let hole = { r: holeRow, c: 0 };
+    grid[hole.r][hole.c] = null;
 
-    const allCells = [];
-    for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) allCells.push([r,c]);
-    allCells.sort(()=>Math.random()-0.5);
-    for (let i=0;i<EMPTY_CELLS_START;i++) {
-      const [r,c] = allCells[i];
-      grid[r][c] = null;
-    }
-
-    const scrambleTarget = 90 + Math.floor(Math.random()*60);
-    let applied = 0, attempts = 0;
-    while (applied < scrambleTarget && attempts < scrambleTarget*15) {
-      attempts++;
-      const r = Math.floor(Math.random()*GRID_SIZE);
-      const c = Math.floor(Math.random()*GRID_SIZE);
-      if (grid[r][c] === null) continue;
-      const dirs = ["up","down","left","right"].sort(()=>Math.random()-0.5);
-      for (const dir of dirs) {
-        const result = computeSlide(grid, r, c, dir);
-        if (result.type === "move") {
-          grid[result.to.r][result.to.c] = grid[r][c];
-          grid[r][c] = null;
-          applied++;
-          break;
-        }
+    const scrambleTarget = 150 + Math.floor(Math.random()*150);
+    let applied = 0, tries = 0;
+    while (applied < scrambleTarget && tries < scrambleTarget*20) {
+      tries++;
+      const neighbors = [
+        { r: hole.r-1, c: hole.c }, { r: hole.r+1, c: hole.c },
+        { r: hole.r, c: hole.c-1 }, { r: hole.r, c: hole.c+1 },
+      ].filter(p => p.r>=0 && p.r<GRID_SIZE && p.c>=0 && p.c<GRID_SIZE && grid[p.r][p.c]!==null);
+      if (neighbors.length===0) continue;
+      const pick = neighbors[Math.floor(Math.random()*neighbors.length)];
+      let dir;
+      if (pick.r < hole.r) dir="down";
+      else if (pick.r > hole.r) dir="up";
+      else if (pick.c < hole.c) dir="right";
+      else dir="left";
+      const res = computeSlide(grid, pick.r, pick.c, dir);
+      if (res.type === "move" && res.to.r===hole.r && res.to.c===hole.c) {
+        grid[hole.r][hole.c] = grid[pick.r][pick.c];
+        grid[pick.r][pick.c] = null;
+        hole = { r: pick.r, c: pick.c };
+        applied++;
       }
     }
 
-    if (hasImmediateExit(grid) || attempt === 5) {
-      const realBlocks = grid.flat().filter(v=>v!==null).length;
-      const baseline = applied + realBlocks;
+    grid[hole.r][hole.c] = heldColor; // plug the last hole — fully packed now
+
+    if (hasImmediateExit(grid) || attempt === 9) {
+      const baseline = applied + GRID_SIZE*GRID_SIZE; // scramble moves + 36 mandatory exits
       return { grid, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
     }
   }
