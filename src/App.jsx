@@ -15,110 +15,63 @@ const COLORS = [
   { id: 5, hex: "#3399FF", dark: "#1166CC", light: "#88CCFF" },
 ];
 
-// ── Core slide physics ──────────────────────────────────────────────────────────
-// A block slides in one direction until it hits a wall or another block.
-// Sliding LEFT out of column 0 only succeeds (exits the board) if the block's
-// color matches its current row — that's the matching "gate".
-function computeSlide(grid, r, c, dir) {
-  const color = grid[r][c];
-  if (color === null) return { type: "none" };
+// ── Repositioning: whole row/column circular rotation (arrows) ─────────────────
+function slideRowLeft(g, row) { const n=g.map(r=>[...r]); const f=n[row][0]; n[row]=[...n[row].slice(1),f]; return n; }
+function slideRowRight(g, row) { const n=g.map(r=>[...r]); const l=n[row][n[row].length-1]; n[row]=[l,...n[row].slice(0,-1)]; return n; }
+function slideColUp(g, col) { const n=g.map(r=>[...r]); const f=n[0][col]; for(let r=0;r<GRID_SIZE-1;r++) n[r][col]=n[r+1][col]; n[GRID_SIZE-1][col]=f; return n; }
+function slideColDown(g, col) { const n=g.map(r=>[...r]); const l=n[GRID_SIZE-1][col]; for(let r=GRID_SIZE-1;r>0;r--) n[r][col]=n[r-1][col]; n[0][col]=l; return n; }
 
-  if (dir === "left") {
-    let cc = c;
-    while (true) {
-      const next = cc - 1;
-      if (next < 0) {
-        if (color === r) return { type: "exit" };
-        return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
-      }
-      if (grid[r][next] !== null) return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
-      cc = next;
-    }
-  }
-  if (dir === "right") {
-    let cc = c;
-    while (cc + 1 <= GRID_SIZE - 1 && grid[r][cc + 1] === null) cc++;
-    return cc === c ? { type: "none" } : { type: "move", to: { r, c: cc } };
-  }
-  if (dir === "up") {
-    let rr = r;
-    while (rr - 1 >= 0 && grid[rr - 1][c] === null) rr--;
-    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-  }
-  if (dir === "down") {
-    let rr = r;
-    while (rr + 1 <= GRID_SIZE - 1 && grid[rr + 1][c] === null) rr++;
-    return rr === r ? { type: "none" } : { type: "move", to: { r: rr, c } };
-  }
-  return { type: "none" };
-}
-
-function emptyGrid() { return Array.from({length:GRID_SIZE}, ()=>Array(GRID_SIZE).fill(null)); }
 function formatTime(s) { return `${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`; }
 
-// ── Generation ────────────────────────────────────────────────────────────────
-// Build the board by "inserting" each block through its own gate and walking it
-// (up/down/right only — never left, so it never accidentally exits) to a random
-// resting spot. Because every block's path only ever moves through cells that
-// were empty at the time, undoing the blocks in reverse-insertion order with the
-// exact opposite path always works — so every generated puzzle is guaranteed
-// solvable, and the total path length gives us a real baseline move count.
-function generatePuzzle(margin) {
-  let grid = emptyGrid();
-  let totalPathMoves = 0;
-  for (let color=0; color<GRID_SIZE; color++) {
-    for (let k=0; k<GRID_SIZE; k++) {
-      if (grid[color][0] !== null) continue; // gate momentarily blocked, skip this copy
-      grid[color][0] = color;
-      let pos = { r: color, c: 0 };
-      const steps = 1 + Math.floor(Math.random()*3);
-      let actualSteps = 0;
-      for (let s=0; s<steps; s++) {
-        const dirs = ["up","down","right"].sort(()=>Math.random()-0.5);
-        let moved = false;
-        for (const dir of dirs) {
-          const result = computeSlide(grid, pos.r, pos.c, dir);
-          if (result.type === "move") {
-            grid[pos.r][pos.c] = null;
-            grid[result.to.r][result.to.c] = color;
-            pos = result.to;
-            moved = true; actualSteps++;
-            break;
-          }
-        }
-        if (!moved) break;
-      }
-      totalPathMoves += actualSteps + 1; // +1 for the eventual exit move
-    }
+// ── Generation: start from the "lined up but not yet sent" board (row r is all
+// color r), scramble it with random row/column rotations. Reversing exactly
+// those rotations gets back to lined-up, then 36 taps clear it — so every
+// generated board is guaranteed solvable, and (scramble + 36) is a real,
+// reachable move count we use as the baseline for the level's move limit.
+function generateGrid(margin) {
+  let g = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+  const scramble = 40 + Math.floor(Math.random()*40);
+  for (let m=0;m<scramble;m++) {
+    const type = Math.random()<0.5 ? "row" : "col";
+    const idx = Math.floor(Math.random()*GRID_SIZE);
+    const dir = Math.random()<0.5;
+    if (type==="row") g = dir ? slideRowLeft(g,idx) : slideRowRight(g,idx);
+    else g = dir ? slideColUp(g,idx) : slideColDown(g,idx);
   }
-  return { grid, moveLimit: Math.ceil(totalPathMoves*(1+margin)), scramble: totalPathMoves };
+  const baseline = scramble + GRID_SIZE*GRID_SIZE; // rotations + the 36 mandatory exits
+  return { grid: g, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
+}
+
+// Remove the block at (r,c): everything to its right in that row shifts left,
+// the freed slot lands at the row's right end.
+function removeFromRow(grid, r, c) {
+  const n = grid.map(row=>[...row]);
+  const row = n[r];
+  n[r] = [...row.slice(0,c), ...row.slice(c+1), null];
+  return n;
 }
 
 function findBonusBlock(grid) {
-  const inOwnRow = [];
-  const any = [];
+  const candidates = [];
   for (let r=0;r<GRID_SIZE;r++) for (let c=0;c<GRID_SIZE;c++) {
-    if (grid[r][c] === null) continue;
-    any.push({r,c});
-    if (grid[r][c] === r) inOwnRow.push({r,c});
+    if (grid[r][c] === r) candidates.push({r,c});
   }
-  const pool = inOwnRow.length>0 ? inOwnRow : any;
-  if (pool.length===0) return null;
-  return pool[Math.floor(Math.random()*pool.length)];
+  if (candidates.length===0) return null;
+  return candidates[Math.floor(Math.random()*candidates.length)];
 }
 
 function randomBonus() { return BONUS_TYPES[Math.floor(Math.random()*BONUS_TYPES.length)]; }
 
 // ── Components ───────────────────────────────────────────────────────────────
-function LegoBlock({ colorId, selected, exiting, onTap }) {
+function LegoBlock({ colorId, eligible, exiting, onTap }) {
   const c = COLORS[colorId];
   return (
     <button onClick={onTap}
       onTouchEnd={(e)=>{ e.preventDefault(); onTap(); }}
       style={{ width:"var(--blk)",height:"var(--blk)",borderRadius:7,background:c.hex,position:"relative",overflow:"hidden",
-        border: selected ? "2px solid #fff" : "2px solid transparent",
-        boxShadow: exiting ? `0 0 22px ${c.hex}` : (selected ? `0 0 14px #ffffffaa, inset 0 -4px 0 ${c.dark}88` : `inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`),
-        transform: exiting ? "scale(1.3)" : (selected ? "scale(1.08)" : "scale(1)"),
+        border: eligible ? "2px solid #ffffffcc" : "2px solid transparent",
+        boxShadow: exiting ? `0 0 22px ${c.hex}` : (eligible ? `0 0 12px #ffffff66, inset 0 -4px 0 ${c.dark}88` : `inset 0 -4px 0 ${c.dark}88, inset 0 1px 0 ${c.light}88`),
+        transform: exiting ? "scale(1.3)" : "scale(1)",
         opacity: exiting ? 0 : 1,
         transition: "transform 0.25s ease, opacity 0.25s ease, box-shadow 0.2s ease",
         padding:0, cursor:"pointer", touchAction:"manipulation", flexShrink:0 }}>
@@ -141,7 +94,7 @@ function EmptySlot() {
     border:"1.5px dashed #ffffff14", background:"#ffffff05", flexShrink:0 }} />;
 }
 
-function DPadBtn({ label, onClick, disabled }) {
+function ArrowBtn({ label, onClick, horizontal, disabled }) {
   const [active, setActive] = useState(false);
   return (
     <button disabled={disabled}
@@ -149,11 +102,12 @@ function DPadBtn({ label, onClick, disabled }) {
       onTouchStart={()=>setActive(true)}
       onTouchEnd={(e)=>{ e.preventDefault(); setActive(false); if(!disabled) onClick(); }}
       onClick={onClick}
-      style={{ width:"min(52px, calc(var(--blk) * 1.1))", height:"min(52px, calc(var(--blk) * 1.1))",
-        background:active?"#E8C54740":"#ffffff10", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
-        borderRadius:10, color:disabled?"#333":(active?"#E8C547":"#ccc"), fontSize:18, fontWeight:700,
-        cursor:disabled?"default":"pointer", display:"flex",alignItems:"center",justifyContent:"center",
-        transform:active?"scale(0.92)":"scale(1)", transition:"all 0.1s",
+      style={{ width:horizontal?"calc(var(--blk) * 0.565)":"var(--blk)",
+        height:horizontal?"var(--blk)":"calc(var(--blk) * 0.565)",
+        background:active?"#E8C54740":"#ffffff12", border:`1px solid ${active?"#E8C54780":"#ffffff18"}`,
+        borderRadius:6, color:disabled?"#333":(active?"#E8C547":"#aaaaaa"), fontSize:11, fontWeight:700,
+        cursor:disabled?"default":"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+        transform:active?"scale(0.93)":"scale(1)", transition:"all 0.1s", padding:0, flexShrink:0,
         opacity:disabled?0.25:1, touchAction:"manipulation" }}>
       {label}
     </button>
@@ -237,11 +191,10 @@ export default function Blokiq() {
   const [mode, setMode] = useState("normal");
   const [level, setLevel] = useState(0);
   const [grid, setGrid] = useState(null);
-  const [selected, setSelected] = useState(null);
   const [exiting, setExiting] = useState(null);
   const [moveLimit, setMoveLimit] = useState(0);
   const [moves, setMoves] = useState(0);
-  const [history, setHistory] = useState([]); // up to 3 past grid snapshots
+  const [history, setHistory] = useState([]);
   const [retryAvailable, setRetryAvailable] = useState(true);
   const [currentMargin, setCurrentMargin] = useState(0);
   const [bonuses, setBonuses] = useState([]);
@@ -253,11 +206,10 @@ export default function Blokiq() {
   const timerRef = useRef(null);
 
   const loadLevel = useCallback((lvl, margin, retryFlag=true) => {
-    const { grid: g, moveLimit: ml } = generatePuzzle(margin);
+    const { grid: g, moveLimit: ml } = generateGrid(margin);
     setLevel(lvl);
     setCurrentMargin(margin);
     setGrid(g);
-    setSelected(null);
     setExiting(null);
     setMoveLimit(ml);
     setMoves(0);
@@ -300,39 +252,30 @@ export default function Blokiq() {
     }
   }, [moveLimit]);
 
-  const handleDirection = useCallback((dir) => {
-    if (!selected || gameStatus !== "playing") return;
-    const { r, c } = selected;
-    const result = computeSlide(grid, r, c, dir);
-    if (result.type === "none") return;
+  // Row/column repositioning arrows
+  const makeMove = useCallback((newGrid) => {
+    if (gameStatus !== "playing") return;
+    const newHistory = [grid.map(row=>[...row]), ...history].slice(0,3);
+    setHistory(newHistory);
+    finishMove(newGrid, moves+1);
+  }, [gameStatus, grid, history, moves, finishMove]);
+
+  // Tap a block: if it's already sitting in its own matching row, it exits.
+  const tapBlock = useCallback((r, c) => {
+    if (gameStatus !== "playing") return;
+    const colorId = grid[r][c];
+    if (colorId === null || colorId !== r) return; // not eligible, do nothing
 
     const newHistory = [grid.map(row=>[...row]), ...history].slice(0,3);
     setHistory(newHistory);
+    setExiting({ r, c });
     const newMoves = moves + 1;
-
-    if (result.type === "exit") {
-      setExiting({ r, c });
-      setSelected(null);
-      setTimeout(() => {
-        const ng = grid.map(row=>[...row]);
-        ng[r][c] = null;
-        setExiting(null);
-        finishMove(ng, newMoves);
-      }, 230);
-    } else {
-      const ng = grid.map(row=>[...row]);
-      ng[result.to.r][result.to.c] = ng[r][c];
-      ng[r][c] = null;
-      setSelected({ r: result.to.r, c: result.to.c });
+    setTimeout(() => {
+      const ng = removeFromRow(grid, r, c);
+      setExiting(null);
       finishMove(ng, newMoves);
-    }
-  }, [selected, grid, gameStatus, history, moves, finishMove]);
-
-  const tapBlock = useCallback((r, c) => {
-    if (gameStatus !== "playing") return;
-    if (grid[r][c] === null) { setSelected(null); return; }
-    setSelected(prev => (prev && prev.r===r && prev.c===c) ? null : { r, c });
-  }, [grid, gameStatus]);
+    }, 230);
+  }, [grid, gameStatus, history, moves, finishMove]);
 
   const useBonus = useCallback((type, fromRetry=false) => {
     setBonuses(b => { const idx=b.indexOf(type); if (idx===-1) return b; return [...b.slice(0,idx), ...b.slice(idx+1)]; });
@@ -343,8 +286,7 @@ export default function Blokiq() {
       if (target) {
         setExiting(target);
         setTimeout(() => {
-          const ng = grid.map(row=>[...row]);
-          ng[target.r][target.c] = null;
+          const ng = removeFromRow(grid, target.r, target.c);
           setExiting(null);
           const remaining = ng.flat().filter(v=>v!==null).length;
           setGrid(ng);
@@ -357,7 +299,6 @@ export default function Blokiq() {
         setGrid(target);
         setMoves(m => Math.max(0, m - history.length));
         setHistory([]);
-        setSelected(null);
       }
     }
     if (fromRetry) setRetryAvailable(true);
@@ -410,7 +351,7 @@ export default function Blokiq() {
 
   return (
     <div style={{ minHeight:"100dvh", width:"100%", boxSizing:"border-box", overflowX:"hidden",
-      "--blk": "min(46px, calc((100vw - 90px) / 6))",
+      "--blk": "min(46px, calc((100vw - 100px) / 7.2))",
       background:"linear-gradient(150deg, #0D0D1C 0%, #141428 55%, #0A0A18 100%)",
       display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       padding:"16px 12px 48px",
@@ -440,7 +381,7 @@ export default function Blokiq() {
 
       <div style={{ display:"flex",alignItems:"center",gap:14,
         background:"#ffffff0A",padding:"7px 18px",borderRadius:20,
-        border:"1px solid #ffffff10",marginBottom:12,flexWrap:"wrap",justifyContent:"center" }}>
+        border:"1px solid #ffffff10",marginBottom:14,flexWrap:"wrap",justifyContent:"center" }}>
         <div style={{ fontSize:9,letterSpacing:3,textTransform:"uppercase",fontWeight:700,
           color:mode==="expert"?"#FF5E8A":"#3399FF",padding:"3px 10px",borderRadius:10,
           background:mode==="expert"?"#FF5E8A18":"#3399FF18",
@@ -467,50 +408,38 @@ export default function Blokiq() {
       </div>
 
       {/* Board */}
-      <div style={{ display:"flex", gap:6 }}>
-        <div style={{ background:"linear-gradient(180deg, #282840, #1E1E34)",borderRadius:18,
-          padding:"10px 8px",boxShadow:"0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
-          border:"1px solid #ffffff0A", maxWidth:"100%" }}>
-          {grid && grid.map((row,r)=>(
-            <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
-              <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
-                boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
-              {row.map((cid,c)=> cid===null
-                ? <EmptySlot key={c} />
-                : <LegoBlock key={c} colorId={cid}
-                    selected={selected && selected.r===r && selected.c===c}
-                    exiting={exiting && exiting.r===r && exiting.c===c}
-                    onTap={()=>tapBlock(r,c)} />
-              )}
-            </div>
+      <div style={{ background:"linear-gradient(180deg, #282840, #1E1E34)",borderRadius:18,
+        padding:"10px 8px",boxShadow:"0 24px 64px #00000090, inset 0 1px 0 #ffffff12",
+        border:"1px solid #ffffff0A", maxWidth:"100%" }}>
+        <div style={{ display:"flex",gap:4,marginBottom:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▲" disabled={disabled} onClick={()=>makeMove(slideColUp(grid,c))} horizontal={false} />
+          ))}
+        </div>
+
+        {grid && grid.map((row,r)=>(
+          <div key={r} style={{ display:"flex",gap:4,alignItems:"center",marginBottom:4 }}>
+            <div style={{ width:10,height:"var(--blk)",borderRadius:5,background:COLORS[r].hex,
+              boxShadow:`0 0 10px ${COLORS[r].hex}88`,flexShrink:0,marginRight:4 }} />
+            <ArrowBtn label="◄" disabled={disabled} onClick={()=>makeMove(slideRowLeft(grid,r))} horizontal={true} />
+            {row.map((cid,c)=> cid===null
+              ? <EmptySlot key={c} />
+              : <LegoBlock key={c} colorId={cid}
+                  eligible={cid===r}
+                  exiting={exiting && exiting.r===r && exiting.c===c}
+                  onTap={()=>tapBlock(r,c)} />
+            )}
+            <ArrowBtn label="►" disabled={disabled} onClick={()=>makeMove(slideRowRight(grid,r))} horizontal={true} />
+          </div>
+        ))}
+
+        <div style={{ display:"flex",gap:4,paddingLeft:"calc(22px + var(--blk) * 0.565)" }}>
+          {Array.from({length:GRID_SIZE},(_,c)=>(
+            <ArrowBtn key={c} label="▼" disabled={disabled} onClick={()=>makeMove(slideColDown(grid,c))} horizontal={false} />
           ))}
         </div>
       </div>
 
-      {/* D-Pad */}
-      <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:4,marginTop:16 }}>
-        <DPadBtn label="▲" disabled={disabled||!selected} onClick={()=>handleDirection("up")} />
-        <div style={{ display:"flex",gap:4 }}>
-          <DPadBtn label="◄" disabled={disabled||!selected} onClick={()=>handleDirection("left")} />
-          <div style={{ width:"min(52px, calc(var(--blk) * 1.1))",height:"min(52px, calc(var(--blk) * 1.1))",
-            display:"flex",alignItems:"center",justifyContent:"center" }}>
-            {selected && <div style={{ width:10,height:10,borderRadius:"50%",background:"#E8C547" }} />}
-          </div>
-          <DPadBtn label="►" disabled={disabled||!selected} onClick={()=>handleDirection("right")} />
-        </div>
-        <DPadBtn label="▼" disabled={disabled||!selected} onClick={()=>handleDirection("down")} />
-      </div>
-
-      <div style={{ fontSize:10,color:"#444",marginTop:14,letterSpacing:1,textAlign:"center" }}>
-        {selected ? "Touche une direction pour déplacer le bloc" : "Touche un bloc pour le sélectionner"}
-      </div>
-      <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
-        background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
-        color:"#333",fontSize:9,letterSpacing:3,textTransform:"uppercase",cursor:"pointer" }}>
-        Menu
-      </button>
-
-      {/* Bonus buttons */}
       {bonuses.length > 0 && gameStatus === "playing" && (
         <div style={{ display:"flex",gap:8,marginTop:12,flexWrap:"wrap",justifyContent:"center" }}>
           {[...new Set(bonuses)].map(b=>(
@@ -523,6 +452,15 @@ export default function Blokiq() {
         </div>
       )}
 
+      <div style={{ fontSize:10,color:"#444",marginTop:12,letterSpacing:1,textAlign:"center" }}>
+        Touche un bloc surligné pour l'envoyer · les flèches repositionnent
+      </div>
+      <button onClick={()=>setScreen("menu")} style={{ marginTop:10,padding:"6px 20px",
+        background:"transparent",border:"1px solid #ffffff0D",borderRadius:10,
+        color:"#333",fontSize:9,letterSpacing:3,textTransform:"uppercase",cursor:"pointer" }}>
+        Menu
+      </button>
+
       {showBonus && (
         <div style={{ position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",
           background:"#1A1A30",border:"1px solid #E8C54760",borderRadius:14,
@@ -532,7 +470,6 @@ export default function Blokiq() {
         </div>
       )}
 
-      {/* WIN overlay */}
       {gameStatus === "won" && (
         <Overlay>
           <div style={{ fontSize:48,marginBottom:8 }}>🏆</div>
@@ -553,7 +490,6 @@ export default function Blokiq() {
         </Overlay>
       )}
 
-      {/* LOST overlay */}
       {gameStatus === "lost" && (
         <Overlay>
           <div style={{ fontSize:48,marginBottom:8 }}>😤</div>
@@ -576,7 +512,6 @@ export default function Blokiq() {
         </Overlay>
       )}
 
-      {/* GAME OVER overlay */}
       {gameStatus === "gameover" && (
         <Overlay>
           <div style={{ fontSize:48,marginBottom:8 }}>💀</div>
