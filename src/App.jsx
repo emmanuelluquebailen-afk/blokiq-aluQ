@@ -92,48 +92,41 @@ function hasImmediateExit(grid) {
 }
 
 // Single-hole "15-puzzle" generation: scramble with exactly ONE empty cell
-// the whole time (so every scramble step is a real, reversible legal move),
-// then plug that last remaining hole at the very end — the board the player
-// sees is genuinely 36/36 full, with zero empty cells.
+// the whole time, then plug that last remaining hole at the very end — the
+// board the player sees is genuinely 36/36 full, with zero empty cells.
+// IMPORTANT: scrambling uses plain, unconditional neighbor swaps — the
+// gameplay gate rule (wrong colors can't enter column 0) is a PLAYING rule,
+// not a setup rule, so it's deliberately not applied here. A piece can
+// always be freely repositioned away later via a normal "right" slide, so
+// this doesn't break solvability — it's what actually produces a real
+// shuffle instead of leaving the board looking pre-solved.
 function generatePuzzle(margin) {
-  for (let attempt=0; attempt<10; attempt++) {
-    let grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
+  let grid, scrambleTarget;
+  for (let attempt=0; attempt<8; attempt++) {
+    grid = COLORS.map((_,i)=>Array(GRID_SIZE).fill(i));
     const holeRow = Math.floor(Math.random()*GRID_SIZE);
     const heldColor = grid[holeRow][0];
     let hole = { r: holeRow, c: 0 };
     grid[hole.r][hole.c] = null;
 
-    const scrambleTarget = 150 + Math.floor(Math.random()*150);
-    let applied = 0, tries = 0;
-    while (applied < scrambleTarget && tries < scrambleTarget*20) {
-      tries++;
+    scrambleTarget = 150 + Math.floor(Math.random()*150);
+    for (let i=0; i<scrambleTarget; i++) {
       const neighbors = [
         { r: hole.r-1, c: hole.c }, { r: hole.r+1, c: hole.c },
         { r: hole.r, c: hole.c-1 }, { r: hole.r, c: hole.c+1 },
-      ].filter(p => p.r>=0 && p.r<GRID_SIZE && p.c>=0 && p.c<GRID_SIZE && grid[p.r][p.c]!==null);
-      if (neighbors.length===0) continue;
+      ].filter(p => p.r>=0 && p.r<GRID_SIZE && p.c>=0 && p.c<GRID_SIZE);
       const pick = neighbors[Math.floor(Math.random()*neighbors.length)];
-      let dir;
-      if (pick.r < hole.r) dir="down";
-      else if (pick.r > hole.r) dir="up";
-      else if (pick.c < hole.c) dir="right";
-      else dir="left";
-      const res = computeSlide(grid, pick.r, pick.c, dir);
-      if (res.type === "move" && res.to.r===hole.r && res.to.c===hole.c) {
-        grid[hole.r][hole.c] = grid[pick.r][pick.c];
-        grid[pick.r][pick.c] = null;
-        hole = { r: pick.r, c: pick.c };
-        applied++;
-      }
+      grid[hole.r][hole.c] = grid[pick.r][pick.c];
+      grid[pick.r][pick.c] = null;
+      hole = pick;
     }
+    grid[hole.r][hole.c] = heldColor;
 
-    grid[hole.r][hole.c] = heldColor; // plug the last hole — fully packed now
-
-    if (hasImmediateExit(grid) || attempt === 9) {
-      const baseline = applied + GRID_SIZE*GRID_SIZE; // scramble moves + 36 mandatory exits
-      return { grid, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
-    }
+    if (hasImmediateExit(grid) || attempt === 7) break;
   }
+
+  const baseline = scrambleTarget + GRID_SIZE*GRID_SIZE;
+  return { grid, moveLimit: Math.ceil(baseline*(1+margin)), scramble: baseline };
 }
 
 function findBonusBlock(grid) {
